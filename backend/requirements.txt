@@ -1,7 +1,7 @@
 fastapi==0.110.0
 uvicorn[standard]==0.27.1
 python-dotenv==1.0.1
-anthropic==0.21.3
+anthropic==0.40.0
 azure-identity==1.15.0
 azure-mgmt-advisor==9.0.0
 azure-mgmt-costmanagement==4.0.1
@@ -15,3 +15,4 @@ pydantic-core==2.10.1
 pydantic-settings==2.2.1
 python-multipart==0.0.9
 aiohttp==3.9.3
+six==1.17.0

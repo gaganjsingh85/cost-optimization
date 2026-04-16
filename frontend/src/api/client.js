@@ -1,103 +1,90 @@
-import axios from 'axios';
+/**
+ * API client for the Azure Cost Optimizer backend.
+ *
+ * If you already have an api/client.js, ADD the new helpers at the bottom
+ * (getSubscriptionInfo, sendChatMessage) and make sure getConfig now expects
+ * the plaintext-non-secret response shape.
+ */
 
-const apiClient = axios.create({
-  baseURL: 'http://localhost:8000',
-  timeout: 120000,
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
+const API_BASE =
+  import.meta.env?.VITE_API_BASE || process.env.REACT_APP_API_BASE || 'http://localhost:8000';
 
-// Request interceptor
-apiClient.interceptors.request.use(
-  (config) => config,
-  (error) => Promise.reject(error)
-);
-
-// Response interceptor - catch network errors and transform to user-friendly messages
-apiClient.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    if (!error.response) {
-      // Network error - backend not reachable
-      const networkError = new Error(
-        'Unable to connect to the backend server. Please ensure the API server is running on http://localhost:8000'
-      );
-      networkError.isNetworkError = true;
-      return Promise.reject(networkError);
-    }
-
-    const { status, data } = error.response;
-
-    switch (status) {
-      case 400:
-        return Promise.reject(new Error(data?.detail || 'Invalid request. Please check your input.'));
-      case 401:
-        return Promise.reject(new Error('Authentication failed. Please check your credentials in Settings.'));
-      case 403:
-        return Promise.reject(new Error('Access denied. Insufficient permissions to perform this action.'));
-      case 404:
-        return Promise.reject(new Error('The requested resource was not found.'));
-      case 422:
-        return Promise.reject(new Error(data?.detail || 'Validation error. Please check your configuration.'));
-      case 500:
-        return Promise.reject(new Error(data?.detail || 'Internal server error. Please try again later.'));
-      case 503:
-        return Promise.reject(new Error('Service unavailable. The backend service is temporarily down.'));
-      default:
-        return Promise.reject(new Error(data?.detail || `Request failed with status ${status}.`));
-    }
+class ApiError extends Error {
+  constructor(message, { status = 0, isNetworkError = false } = {}) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.isNetworkError = isNetworkError;
   }
-);
+}
 
-// Configuration endpoints
-export const getConfig = () =>
-  apiClient.get('/api/config').then((res) => res.data);
+async function request(path, { method = 'GET', body, signal } = {}) {
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      signal,
+    });
+  } catch (err) {
+    throw new ApiError(
+      'Unable to reach the backend. Is it running on ' + API_BASE + '?',
+      { isNetworkError: true }
+    );
+  }
 
-export const saveConfig = (data) =>
-  apiClient.post('/api/config', data).then((res) => res.data);
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      const data = await response.json();
+      detail = data.detail || data.message || detail;
+    } catch {
+      // ignore
+    }
+    throw new ApiError(detail, { status: response.status });
+  }
 
-export const deleteConfig = () =>
-  apiClient.delete('/api/config').then((res) => res.data);
+  if (response.status === 204) return null;
+  return response.json();
+}
 
-// Azure Advisor endpoints
-export const getAdvisorRecommendations = (category = null) => {
-  const params = category && category !== 'All' ? { category } : {};
-  return apiClient.get('/api/advisor/recommendations', { params }).then((res) => res.data);
-};
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+export const getConfig = () => request('/api/config/');
+export const getConfigStatus = () => request('/api/config/status');
+export const saveConfig = (payload) => request('/api/config/', { method: 'POST', body: payload });
+export const deleteConfig = () => request('/api/config/', { method: 'DELETE' });
 
-export const getAdvisorSummary = () =>
-  apiClient.get('/api/advisor/summary').then((res) => res.data);
+// ---------------------------------------------------------------------------
+// Azure
+// ---------------------------------------------------------------------------
+export const getSubscriptionInfo = () => request('/api/azure/subscription');
+export const getCostSummary = (days = 30) => request(`/api/costs/summary?days=${days}`);
+export const getCostBreakdown = (days = 30) => request(`/api/costs/breakdown?days=${days}`);
+export const getAdvisorRecommendations = (category) =>
+  request('/api/advisor/recommendations' + (category ? `?category=${category}` : ''));
+export const getAdvisorSummary = () => request('/api/advisor/summary');
 
-// Cost Analysis endpoints
-export const getCostSummary = (days = 30) =>
-  apiClient.get('/api/costs/summary', { params: { days } }).then((res) => res.data);
+// ---------------------------------------------------------------------------
+// M365
+// ---------------------------------------------------------------------------
+export const getM365Licenses = () => request('/api/m365/licenses');
+export const getM365Usage = () => request('/api/m365/usage');
+export const getM365Summary = () => request('/api/m365/summary');
 
-export const getCostBreakdown = () =>
-  apiClient.get('/api/costs/breakdown').then((res) => res.data);
+// ---------------------------------------------------------------------------
+// AI Analysis
+// ---------------------------------------------------------------------------
+export const analyzeAzure = () => request('/api/analyze/azure', { method: 'POST', body: {} });
+export const analyzeM365 = () => request('/api/analyze/m365', { method: 'POST', body: {} });
+export const analyzeAll = () => request('/api/analyze/full', { method: 'POST', body: {} });
 
-// M365 Licensing endpoints
-export const getM365Licenses = () =>
-  apiClient.get('/api/m365/licenses').then((res) => res.data);
+// ---------------------------------------------------------------------------
+// Chat agent
+// ---------------------------------------------------------------------------
+export const sendChatMessage = (message, history = []) =>
+  request('/api/chat/', { method: 'POST', body: { message, history } });
 
-export const getM365Usage = () =>
-  apiClient.get('/api/m365/usage').then((res) => res.data);
-
-export const getM365Summary = () =>
-  apiClient.get('/api/m365/summary').then((res) => res.data);
-
-// AI Analysis endpoints
-export const analyzeAzure = () =>
-  apiClient.post('/api/analyze/azure').then((res) => res.data);
-
-export const analyzeM365 = () =>
-  apiClient.post('/api/analyze/m365').then((res) => res.data);
-
-export const analyzeAll = () =>
-  apiClient.post('/api/analyze/full').then((res) => res.data);
-
-// Health check
-export const healthCheck = () =>
-  apiClient.get('/health').then((res) => res.data);
-
-export default apiClient;
+export { ApiError };

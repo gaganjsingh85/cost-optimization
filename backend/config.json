@@ -1,10 +1,10 @@
 {
   "azure_tenant_id": "6fe8d73b-53aa-4530-a509-eebe12a649bb",
-  "azure_client_id": "10cae7cc-69dd-46a3-8b12-7bca1aeb6e8a",
+  "azure_client_id": "5d3227e7-1b98-451b-9290-8dc15865f90b",
   "azure_client_secret": "9KU8Q~itIpoSBPTkA577nJ23BPBJ0TMf-mCRNdcE",
   "azure_subscription_id": "bb02c374-4c1f-4ab5-97b6-45386b81ccd6",
   "m365_tenant_id": "6fe8d73b-53aa-4530-a509-eebe12a649bb",
-  "m365_client_id": "10cae7cc-69dd-46a3-8b12-7bca1aeb6e8a",
+  "m365_client_id": "5d3227e7-1b98-451b-9290-8dc15865f90b",
   "m365_client_secret": "9KU8Q~itIpoSBPTkA577nJ23BPBJ0TMf-mCRNdcE",
   "anthropic_api_key": "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"
 }

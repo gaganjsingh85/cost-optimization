@@ -3,8 +3,10 @@ Azure Cost Optimizer API - Main Application Entry Point
 
 FastAPI application providing endpoints for:
 - Azure cost data (Advisor recommendations, Cost Management, compute rightsizing)
+- Azure subscription info
 - Microsoft 365 license usage and optimization
 - Claude AI-powered FinOps analysis
+- Conversational FinOps chat agent
 - Configuration management
 """
 
@@ -19,6 +21,8 @@ from routers.advisor_router import router as advisor_router
 from routers.costs_router import router as costs_router
 from routers.m365_router import router as m365_router
 from routers.analyze_router import router as analyze_router
+from routers.subscription_router import router as subscription_router
+from routers.chats_router import router as chat_router
 
 # ---------------------------------------------------------------------------
 # Logging configuration
@@ -37,11 +41,11 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Azure Cost Optimizer API",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "Backend API for the Azure Cost Optimization agent. "
-        "Provides Azure cost data, M365 license analysis, and Claude AI-powered "
-        "FinOps recommendations."
+        "Provides Azure cost data, M365 license analysis, Claude AI-powered "
+        "FinOps recommendations, and a conversational chat agent."
     ),
     docs_url="/docs",
     redoc_url="/redoc",
@@ -69,6 +73,8 @@ app.include_router(advisor_router)
 app.include_router(costs_router)
 app.include_router(m365_router)
 app.include_router(analyze_router)
+app.include_router(subscription_router)
+app.include_router(chat_router)
 
 # ---------------------------------------------------------------------------
 # Health check
@@ -77,7 +83,7 @@ app.include_router(analyze_router)
 @app.get("/api/health", tags=["Health"], summary="Health check")
 def health():
     """Returns API health status."""
-    return {"status": "ok", "service": "azure-cost-optimizer-api", "version": "1.0.0"}
+    return {"status": "ok", "service": "azure-cost-optimizer-api", "version": "1.1.0"}
 
 
 @app.get("/", tags=["Root"], include_in_schema=False)
@@ -93,7 +99,6 @@ def root():
 
 @app.on_event("startup")
 async def on_startup():
-    """Runs on application startup."""
     from config import load_config
     config = load_config()
     logger.info("Azure Cost Optimizer API starting up...")
@@ -108,13 +113,8 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    """Runs on application shutdown."""
     logger.info("Azure Cost Optimizer API shutting down.")
 
-
-# ---------------------------------------------------------------------------
-# Entry point for direct execution
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn

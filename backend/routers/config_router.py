@@ -1,10 +1,15 @@
 """
 Config router for Azure Cost Optimizer API.
 Handles reading, writing, and deleting configuration.
+
+GET /api/config/         -> returns non-secret fields in plaintext + boolean flags for secrets
+GET /api/config/status   -> returns only boolean flags (legacy / header use)
+POST /api/config/        -> merges a partial payload into the saved config
+DELETE /api/config/      -> deletes the saved config file
 """
 
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -31,56 +36,67 @@ class ConfigUpdateRequest(BaseModel):
     anthropic_api_key: Optional[str] = Field(None, description="Anthropic API key")
 
 
+class ConfigReadResponse(BaseModel):
+    """Plaintext response for non-secret fields; booleans for secrets."""
+    # Non-secrets (plaintext)
+    azure_tenant_id: Optional[str] = None
+    azure_client_id: Optional[str] = None
+    azure_subscription_id: Optional[str] = None
+    m365_tenant_id: Optional[str] = None
+    m365_client_id: Optional[str] = None
+
+    # Secrets (boolean presence only)
+    azure_client_secret_set: bool = False
+    m365_client_secret_set: bool = False
+    anthropic_api_key_set: bool = False
+
+    # Overall flags
+    has_azure: bool = False
+    has_m365: bool = False
+    has_anthropic: bool = False
+
+
 class ConfigStatusResponse(BaseModel):
     has_azure: bool
     has_m365: bool
     has_anthropic: bool
-    azure_tenant_id_hint: Optional[str] = None
-    azure_client_id_hint: Optional[str] = None
-    azure_subscription_id_hint: Optional[str] = None
-    m365_tenant_id_hint: Optional[str] = None
-    m365_client_id_hint: Optional[str] = None
-    anthropic_api_key_hint: Optional[str] = None
-
-
-def _mask_value(value: Optional[str], show_last: int = 8) -> Optional[str]:
-    """Returns last N chars of a value with leading asterisks, or None."""
-    if not value:
-        return None
-    if len(value) <= show_last:
-        return "*" * len(value)
-    return "*" * (len(value) - show_last) + value[-show_last:]
-
-
-def _mask_secret(value: Optional[str]) -> Optional[str]:
-    """Returns '*****' if value is present, None otherwise."""
-    if not value:
-        return None
-    return "*****"
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
-@router.get("/", response_model=ConfigStatusResponse, summary="Get current config status")
+@router.get("/", response_model=ConfigReadResponse, summary="Get current config")
+async def get_config():
+    """
+    Returns the current non-secret configuration fields in plaintext so the
+    Settings UI can populate its form. Secret fields are returned as boolean
+    flags only (*_set) to indicate whether they have a value.
+    """
+    config = load_config()
+    return ConfigReadResponse(
+        azure_tenant_id=config.azure_tenant_id,
+        azure_client_id=config.azure_client_id,
+        azure_subscription_id=config.azure_subscription_id,
+        m365_tenant_id=config.m365_tenant_id,
+        m365_client_id=config.m365_client_id,
+        azure_client_secret_set=bool(config.azure_client_secret),
+        m365_client_secret_set=bool(config.m365_client_secret),
+        anthropic_api_key_set=bool(config.anthropic_api_key),
+        has_azure=config.has_azure_config(),
+        has_m365=config.has_m365_config(),
+        has_anthropic=config.has_anthropic_config(),
+    )
+
+
+@router.get("/status", response_model=ConfigStatusResponse, summary="Get config presence flags only")
 async def get_config_status():
-    """
-    Returns the current configuration status with masked sensitive values.
-    Tenant IDs and client IDs show the last 8 characters.
-    Secrets are fully masked.
-    """
+    """Returns only boolean flags - lightweight check for Layout/header."""
     config = load_config()
     return ConfigStatusResponse(
         has_azure=config.has_azure_config(),
         has_m365=config.has_m365_config(),
         has_anthropic=config.has_anthropic_config(),
-        azure_tenant_id_hint=_mask_value(config.azure_tenant_id, show_last=8),
-        azure_client_id_hint=_mask_value(config.azure_client_id, show_last=8),
-        azure_subscription_id_hint=_mask_value(config.azure_subscription_id, show_last=8),
-        m365_tenant_id_hint=_mask_value(config.m365_tenant_id, show_last=8),
-        m365_client_id_hint=_mask_value(config.m365_client_id, show_last=8),
-        anthropic_api_key_hint=_mask_secret(config.anthropic_api_key),
     )
 
 
@@ -89,22 +105,27 @@ async def save_config(request: ConfigUpdateRequest):
     """
     Accepts a full or partial configuration payload.
     Merges with existing config and saves to config.json.
-    Returns success confirmation.
+    Empty-string values are treated as "no change" so the UI can safely send
+    a blank secret field when the user hasn't typed anything new.
     """
     try:
-        # Load existing config to merge with new values
         existing = load_config()
 
-        # Build updated config, preferring new values over existing
+        def _merge(new_val: Optional[str], existing_val: Optional[str]) -> Optional[str]:
+            # Treat None or empty string as "keep existing"
+            if new_val is None or new_val == "":
+                return existing_val
+            return new_val
+
         updated = Config(
-            azure_tenant_id=request.azure_tenant_id or existing.azure_tenant_id,
-            azure_client_id=request.azure_client_id or existing.azure_client_id,
-            azure_client_secret=request.azure_client_secret or existing.azure_client_secret,
-            azure_subscription_id=request.azure_subscription_id or existing.azure_subscription_id,
-            m365_tenant_id=request.m365_tenant_id or existing.m365_tenant_id,
-            m365_client_id=request.m365_client_id or existing.m365_client_id,
-            m365_client_secret=request.m365_client_secret or existing.m365_client_secret,
-            anthropic_api_key=request.anthropic_api_key or existing.anthropic_api_key,
+            azure_tenant_id=_merge(request.azure_tenant_id, existing.azure_tenant_id),
+            azure_client_id=_merge(request.azure_client_id, existing.azure_client_id),
+            azure_client_secret=_merge(request.azure_client_secret, existing.azure_client_secret),
+            azure_subscription_id=_merge(request.azure_subscription_id, existing.azure_subscription_id),
+            m365_tenant_id=_merge(request.m365_tenant_id, existing.m365_tenant_id),
+            m365_client_id=_merge(request.m365_client_id, existing.m365_client_id),
+            m365_client_secret=_merge(request.m365_client_secret, existing.m365_client_secret),
+            anthropic_api_key=_merge(request.anthropic_api_key, existing.anthropic_api_key),
         )
 
         updated.save_to_file()
@@ -123,10 +144,7 @@ async def save_config(request: ConfigUpdateRequest):
 
 @router.delete("/", summary="Delete saved configuration")
 async def delete_config():
-    """
-    Deletes the config.json file.
-    After deletion, the app will fall back to environment variables.
-    """
+    """Deletes config.json. After deletion the app falls back to environment variables."""
     try:
         deleted = delete_config_file()
         if deleted:

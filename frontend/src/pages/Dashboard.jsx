@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   BarChart,
@@ -26,7 +26,7 @@ import LoadingSpinner from '../components/LoadingSpinner';
 import {
   getCostSummary,
   getAdvisorRecommendations,
-  getM365Licenses,
+  getM365Summary,
   analyzeAll,
 } from '../api/client';
 
@@ -62,7 +62,8 @@ function Dashboard() {
 
   const [costData, setCostData] = useState(null);
   const [recommendations, setRecommendations] = useState([]);
-  const [licenses, setLicenses] = useState([]);
+  const [advisorAll, setAdvisorAll] = useState([]); // full list, for savings calc
+  const [m365Summary, setM365Summary] = useState(null);
   const [analysisResult, setAnalysisResult] = useState(null);
 
   const loadData = useCallback(async () => {
@@ -73,20 +74,23 @@ function Dashboard() {
       const [costRes, advisorRes, m365Res] = await Promise.allSettled([
         getCostSummary(30),
         getAdvisorRecommendations(),
-        getM365Licenses(),
+        getM365Summary(),
       ]);
 
       if (costRes.status === 'fulfilled') setCostData(costRes.value);
+
       if (advisorRes.status === 'fulfilled') {
-        const recs = advisorRes.value?.recommendations || advisorRes.value || [];
+        const recs = advisorRes.value?.recommendations || [];
+        setAdvisorAll(recs);
         const sorted = [...recs].sort((a, b) => {
           const order = { High: 0, Medium: 1, Low: 2 };
           return (order[a.impact] ?? 3) - (order[b.impact] ?? 3);
         });
         setRecommendations(sorted.slice(0, 5));
       }
+
       if (m365Res.status === 'fulfilled') {
-        setLicenses(m365Res.value?.licenses || m365Res.value || []);
+        setM365Summary(m365Res.value);
       }
 
       const anyFailed = [costRes, advisorRes, m365Res].some(
@@ -118,35 +122,75 @@ function Dashboard() {
     }
   };
 
-  // Build chart data from cost summary
-  const serviceChartData = React.useMemo(() => {
-    const services = costData?.by_service || costData?.services || [];
-    if (Array.isArray(services)) {
-      return services
-        .slice(0, 8)
-        .map((s) => ({
-          name: (s.service_name || s.name || s.service || 'Unknown').replace('Microsoft.', ''),
-          cost: parseFloat(s.cost || s.total_cost || 0),
-        }))
-        .sort((a, b) => b.cost - a.cost);
-    }
-    return [];
+  // ------------------------- KPI derivations (FIXED) -------------------------
+
+  // Azure total spend: from cost summary
+  const totalAzureSpend = useMemo(() => {
+    if (!costData) return null;
+    return costData.total_cost ?? null;
   }, [costData]);
 
-  const totalAzureSpend = costData?.total_cost ?? costData?.total ?? null;
-  const potentialAzureSavings = costData?.potential_savings ?? null;
-  const m365MonthlySpend = licenses.reduce(
-    (sum, l) => sum + (l.monthly_cost || 0),
-    0
-  );
-  const m365PotentialSavings = licenses.reduce(
-    (sum, l) => sum + ((l.unused_count || 0) * (l.unit_price || 0)),
-    0
-  );
+  // Azure potential savings: derived from Advisor (backend doesn't return it on /costs/summary)
+  // Sum annual savings across all cost-category recs, divide by 12 for monthly
+  const potentialAzureSavings = useMemo(() => {
+    if (!advisorAll || advisorAll.length === 0) return null;
+    const annualTotal = advisorAll.reduce(
+      (sum, r) => sum + (r.potential_annual_savings || 0),
+      0
+    );
+    return annualTotal > 0 ? annualTotal / 12 : 0;
+  }, [advisorAll]);
+
+  // M365 monthly spend: use the summary endpoint which already totals it
+  const m365MonthlySpend = useMemo(() => {
+    if (!m365Summary) return null;
+    return m365Summary.total_monthly_spend_estimate ?? null;
+  }, [m365Summary]);
+
+  // M365 potential savings
+  const m365PotentialSavings = useMemo(() => {
+    if (!m365Summary) return null;
+    return m365Summary.potential_savings ?? null;
+  }, [m365Summary]);
+
+  // Chart data: services by cost
+  const serviceChartData = useMemo(() => {
+    const services = costData?.by_service || [];
+    return services
+      .slice(0, 8)
+      .map((s) => ({
+        name: (s.service_name || 'Unknown').replace('Microsoft.', ''),
+        cost: parseFloat(s.cost || 0),
+      }))
+      .sort((a, b) => b.cost - a.cost);
+  }, [costData]);
+
+  // License rows for the table - adapted to backend shape
+  const licenseRows = useMemo(() => {
+    const licenses = m365Summary?.licenses || [];
+    return licenses.map((lic) => {
+      const purchased = lic.enabled_units ?? 0;
+      const active = lic.consumed_units ?? 0;
+      const unused = lic.unused_units ?? Math.max(0, purchased - active);
+      const unitCost = lic.unit_cost_estimate ?? 0;
+      const monthlyCost = active * unitCost;
+      const savingsOpp = lic.unused_cost_estimate ?? unused * unitCost;
+
+      return {
+        key: lic.sku_id || lic.sku_part_number,
+        name: lic.friendly_name || lic.sku_part_number || 'Unknown',
+        purchased,
+        active,
+        unused,
+        monthlyCost,
+        savingsOpp,
+      };
+    });
+  }, [m365Summary]);
 
   const quickWins =
+    analysisResult?.azure?.quick_wins ||
     analysisResult?.quick_wins ||
-    analysisResult?.azure_analysis?.quick_wins ||
     [];
 
   return (
@@ -215,7 +259,7 @@ function Dashboard() {
         <SavingsCard
           title="Potential Azure Savings"
           value={loading ? null : formatCurrency(potentialAzureSavings)}
-          subtitle="Based on Advisor"
+          subtitle="From Advisor (monthly)"
           icon={TrendingDown}
           color="green"
           loading={loading}
@@ -223,7 +267,7 @@ function Dashboard() {
         <SavingsCard
           title="M365 Monthly Spend"
           value={loading ? null : formatCurrency(m365MonthlySpend)}
-          subtitle="All license types"
+          subtitle="All licensed users"
           icon={Users}
           color="purple"
           loading={loading}
@@ -231,7 +275,7 @@ function Dashboard() {
         <SavingsCard
           title="Potential M365 Savings"
           value={loading ? null : formatCurrency(m365PotentialSavings)}
-          subtitle="Unused licenses"
+          subtitle="Unused + inactive"
           icon={TrendingDown}
           color="green"
           loading={loading}
@@ -333,7 +377,7 @@ function Dashboard() {
           <div className="p-8">
             <LoadingSpinner message="Loading license data..." fullPage />
           </div>
-        ) : licenses.length === 0 ? (
+        ) : licenseRows.length === 0 ? (
           <div className="text-center py-8 text-gray-500">
             <Users className="w-10 h-10 mx-auto mb-2 opacity-30" />
             <p className="text-sm">No license data available</p>
@@ -352,32 +396,20 @@ function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {licenses.map((lic, idx) => {
-                  const unused = (lic.purchased_count || lic.total || 0) - (lic.active_count || lic.used || 0);
-                  const savingsOpp = unused * (lic.unit_price || 0);
-                  return (
-                    <tr key={lic.sku_id || idx} className="border-b border-gray-700/50 hover:bg-gray-700/30">
-                      <td className="px-5 py-3 text-white font-medium">
-                        {lic.sku_name || lic.license_name || lic.name || 'Unknown'}
-                      </td>
-                      <td className="px-4 py-3 text-gray-300 text-right">
-                        {(lic.purchased_count || lic.total || 0).toLocaleString()}
-                      </td>
-                      <td className="px-4 py-3 text-green-400 text-right">
-                        {(lic.active_count || lic.used || 0).toLocaleString()}
-                      </td>
-                      <td className={`px-4 py-3 text-right font-medium ${unused > 0 ? 'text-red-400' : 'text-gray-400'}`}>
-                        {unused.toLocaleString()}
-                      </td>
-                      <td className="px-4 py-3 text-gray-300 text-right">
-                        {formatCurrency(lic.monthly_cost || 0)}
-                      </td>
-                      <td className={`px-5 py-3 text-right font-semibold ${savingsOpp > 0 ? 'text-green-400' : 'text-gray-500'}`}>
-                        {savingsOpp > 0 ? formatCurrency(savingsOpp) : '—'}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {licenseRows.map((row, idx) => (
+                  <tr key={row.key || idx} className="border-b border-gray-700/50 hover:bg-gray-700/30">
+                    <td className="px-5 py-3 text-white font-medium">{row.name}</td>
+                    <td className="px-4 py-3 text-gray-300 text-right">{row.purchased.toLocaleString()}</td>
+                    <td className="px-4 py-3 text-green-400 text-right">{row.active.toLocaleString()}</td>
+                    <td className={`px-4 py-3 text-right font-medium ${row.unused > 0 ? 'text-red-400' : 'text-gray-400'}`}>
+                      {row.unused.toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3 text-gray-300 text-right">{formatCurrency(row.monthlyCost)}</td>
+                    <td className={`px-5 py-3 text-right font-semibold ${row.savingsOpp > 0 ? 'text-green-400' : 'text-gray-500'}`}>
+                      {row.savingsOpp > 0 ? formatCurrency(row.savingsOpp) : '—'}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -398,7 +430,9 @@ function Dashboard() {
               {quickWins.map((win, idx) => (
                 <li key={idx} className="flex items-start gap-2.5">
                   <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0 mt-0.5" />
-                  <span className="text-gray-300 text-sm">{win}</span>
+                  <span className="text-gray-300 text-sm">
+                    {typeof win === 'string' ? win : win.action || win.title || JSON.stringify(win)}
+                  </span>
                 </li>
               ))}
             </ul>

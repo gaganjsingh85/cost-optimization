@@ -231,6 +231,13 @@ _SAMPLE_COMPUTE_RIGHTSIZING = [
     },
 ]
 
+_SAMPLE_SUBSCRIPTION = {
+    "subscription_id": "demo-subscription-id",
+    "display_name": "Demo Subscription (Sample Data)",
+    "state": "Enabled",
+    "tenant_id": "demo-tenant-id",
+    "sample_data": True,
+}
 
 # ---------------------------------------------------------------------------
 # Helper utilities
@@ -634,3 +641,37 @@ def get_compute_rightsizing(config) -> list[dict]:
     except Exception as exc:
         logger.error("Failed to fetch compute rightsizing data: %s", exc)
         return _SAMPLE_COMPUTE_RIGHTSIZING
+    
+def get_subscription_info(config) -> dict:
+    """
+    Fetches the Azure subscription display name, ID, state, and tenant ID.
+    Falls back to sample data when credentials are missing or the call fails.
+    """
+    if not config.has_azure_config():
+        logger.info("No Azure config present - returning sample subscription info.")
+        return _SAMPLE_SUBSCRIPTION
+ 
+    try:
+        from azure.mgmt.subscription import SubscriptionClient
+ 
+        credential = get_credential(config)
+        client = SubscriptionClient(credential)
+        sub = client.subscriptions.get(config.azure_subscription_id)
+ 
+        return {
+            "subscription_id": sub.subscription_id or config.azure_subscription_id,
+            "display_name": sub.display_name or "Unnamed Subscription",
+            "state": str(sub.state) if sub.state else "Unknown",
+            "tenant_id": sub.tenant_id or config.azure_tenant_id,
+            "sample_data": False,
+        }
+    except Exception as exc:
+        logger.error("Failed to fetch subscription info: %s", exc)
+        return {
+            "subscription_id": config.azure_subscription_id or "unknown",
+            "display_name": "Unable to fetch subscription name",
+            "state": "Unknown",
+            "tenant_id": config.azure_tenant_id or "unknown",
+            "sample_data": False,
+            "error": str(exc),
+        }

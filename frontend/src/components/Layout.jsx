@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
 import { AlertTriangle, X } from 'lucide-react';
 import Sidebar from './Sidebar';
+import SubscriptionBar from './SubscriptionBar';
+import ChatAgent from './ChatAgent';
 import { getConfig } from '../api/client';
 
 function Layout() {
@@ -21,18 +23,11 @@ function Layout() {
     try {
       const config = await getConfig();
       setConfigStatus({
-        azureConfigured: !!(
-          config.azure_tenant_id &&
-          config.azure_client_id &&
-          config.azure_subscription_id
-        ),
-        m365Configured: !!(
-          config.m365_tenant_id &&
-          config.m365_client_id
-        ),
+        azureConfigured: !!config.has_azure,
+        m365Configured: !!config.has_m365,
         loading: false,
       });
-    } catch (err) {
+    } catch {
       setConfigStatus({
         azureConfigured: false,
         m365Configured: false,
@@ -58,6 +53,9 @@ function Layout() {
       <Sidebar />
 
       <div className="flex flex-col flex-1 overflow-hidden">
+        {/* Subscription Header Bar */}
+        <SubscriptionBar />
+
         {/* Setup Banner */}
         {showBanner && (
           <div className="bg-amber-900 border-b border-amber-700 px-4 py-3 flex items-center justify-between flex-shrink-0">
@@ -90,6 +88,9 @@ function Layout() {
           <Outlet context={{ configStatus, refreshConfig: checkConfigStatus }} />
         </main>
       </div>
+
+      {/* Floating Chat Agent (always available) */}
+      <ChatAgent />
     </div>
   );
 }
