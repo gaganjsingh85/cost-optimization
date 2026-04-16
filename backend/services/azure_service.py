@@ -57,7 +57,12 @@ _SAMPLE_ADVISOR = [
         "impact": "High",
         "impacted_field": "Microsoft.Compute/virtualMachines",
         "impacted_value": "vm-demo-001",
-        "short_description": "Right-size or shut down underutilized virtual machines",
+        "short_description": {
+            "problem": "Right-size or shut down underutilized virtual machines",
+            "solution": "Based on utilization patterns, this VM can be resized to a smaller SKU to reduce costs.",
+        },
+        "description": "Right-size or shut down underutilized virtual machines",
+        "recommendation_type": "VirtualMachineRightSizing",
         "extended_properties": {"annualSavingsAmount": "1766.40"},
         "potential_annual_savings": 1766.40,
         "resource_group": "rg-demo",
@@ -187,45 +192,159 @@ def get_advisor_recommendations_with_status(config) -> dict:
 
             credential = get_credential(config)
             client = AdvisorManagementClient(credential, config.azure_subscription_id)
-            recs = []
-            for rec in client.recommendations.list():
+
+            # The SDK's list() returns CACHED recommendations. If the cache is
+            # empty/stale, we need to trigger generation and retry.
+            raw_recs = list(client.recommendations.list())
+            logger.info(
+                "Advisor.recommendations.list() returned %d raw items for subscription %s",
+                len(raw_recs), config.azure_subscription_id,
+            )
+
+            # If empty, trigger a regeneration and retry once. This is the
+            # ONLY way to get recommendations on a fresh or long-idle
+            # subscription where Azure's own cache has expired.
+            if not raw_recs:
+                logger.info("Advisor cache empty - triggering generate_recommendations()")
                 try:
-                    props = getattr(rec, "properties", None)
-                    if props is None:
-                        continue
+                    client.recommendations.generate()
+                    # Generation is async on Azure's side. Wait briefly.
+                    import time as _t
+                    _t.sleep(8)
+                    raw_recs = list(client.recommendations.list())
+                    logger.info(
+                        "After generate: Advisor returned %d recommendations",
+                        len(raw_recs),
+                    )
+                except Exception as gen_exc:
+                    logger.warning("generate_recommendations() failed: %s", gen_exc)
+
+            recs = []
+            skipped = 0
+            first_rec_logged = False
+            for rec in raw_recs:
+                # In newer azure-mgmt-advisor SDKs (4.x+), fields are flattened
+                # directly onto the rec object. In older versions, they're
+                # nested under rec.properties. Handle both by using rec.properties
+                # if it exists, else falling back to rec itself.
+                props = getattr(rec, "properties", None) or rec
+
+                # Log the first rec's structure once so we can see what the SDK
+                # is actually returning if parsing is failing.
+                if not first_rec_logged:
+                    try:
+                        logger.info(
+                            "First rec sample - id=%s, name=%s, type=%s, using_properties_attr=%s",
+                            getattr(rec, "id", "?"),
+                            getattr(rec, "name", "?"),
+                            type(rec).__name__,
+                            getattr(rec, "properties", None) is not None,
+                        )
+                        logger.info(
+                            "First rec props type=%s, key attrs present: category=%s, impact=%s, short_description=%s, extended_properties=%s",
+                            type(props).__name__,
+                            hasattr(props, "category"),
+                            hasattr(props, "impact"),
+                            hasattr(props, "short_description"),
+                            hasattr(props, "extended_properties"),
+                        )
+                        sd_dbg = getattr(props, "short_description", None)
+                        logger.info(
+                            "First rec short_description - type=%s, value=%r",
+                            type(sd_dbg).__name__ if sd_dbg else "None",
+                            str(sd_dbg)[:200] if sd_dbg else None,
+                        )
+                    except Exception as dbg_exc:
+                        logger.warning("Diagnostic logging failed: %s", dbg_exc)
+                    first_rec_logged = True
+
+                try:
+                    # Extract each field independently so one bad field doesn't
+                    # skip the whole rec.
+                    def _safe_get(obj, attr, default=""):
+                        try:
+                            v = getattr(obj, attr, default)
+                            return v if v is not None else default
+                        except Exception:
+                            return default
 
                     ep = {}
-                    if getattr(props, "extended_properties", None):
-                        ep = dict(props.extended_properties)
+                    try:
+                        raw_ep = _safe_get(props, "extended_properties", None)
+                        if raw_ep:
+                            ep = dict(raw_ep)
+                    except Exception as ep_exc:
+                        logger.warning("Failed to parse extended_properties: %s", ep_exc)
 
-                    short_desc = ""
-                    sd = getattr(props, "short_description", None)
-                    if sd is not None:
-                        solution = getattr(sd, "solution", None)
-                        problem = getattr(sd, "problem", None)
-                        short_desc = solution or problem or ""
+                    # short_description in the Advisor SDK is a ShortDescription
+                    # object with .problem and .solution attributes. Handle both
+                    # object and string (older/newer SDK variance) forms.
+                    problem_text = ""
+                    solution_text = ""
+                    try:
+                        sd = _safe_get(props, "short_description", None)
+                        if sd is not None:
+                            if isinstance(sd, str):
+                                problem_text = sd
+                            else:
+                                problem_text = str(_safe_get(sd, "problem", "") or "")
+                                solution_text = str(_safe_get(sd, "solution", "") or "")
+                    except Exception as sd_exc:
+                        logger.warning("Failed to parse short_description: %s", sd_exc)
 
-                    category = str(getattr(props, "category", "") or "")
-                    impact = str(getattr(props, "impact", "") or "")
-                    impacted_field = getattr(props, "impacted_field", "") or ""
-                    impacted_value = getattr(props, "impacted_value", "") or ""
+                    # Fallback - some recs only populate description at top level
+                    if not problem_text:
+                        problem_text = str(_safe_get(props, "description", "") or "")
 
-                    resource_id = rec.id or ""
+                    # Also check extended_properties.recommendationType for a human label
+                    rec_type = ep.get("recommendationType") or ep.get("recommendationTypeId", "") or ""
+                    # And the "displayName" / "reason" fields that sometimes appear
+                    display_name = ep.get("displayName") or ep.get("reason", "") or ""
+                    if not problem_text and display_name:
+                        problem_text = display_name
+
+                    category = str(_safe_get(props, "category", "") or "")
+                    impact = str(_safe_get(props, "impact", "") or "")
+                    impacted_field = str(_safe_get(props, "impacted_field", "") or "")
+                    impacted_value = str(_safe_get(props, "impacted_value", "") or "")
+
+                    resource_id = str(_safe_get(rec, "id", "") or "")
                     resource_group = ""
-                    parts = resource_id.split("/")
-                    if "resourceGroups" in parts:
-                        idx = parts.index("resourceGroups")
-                        if idx + 1 < len(parts):
-                            resource_group = parts[idx + 1]
+                    if resource_id:
+                        parts = resource_id.split("/")
+                        # resource_group name appears after "resourceGroups" (case-insensitive)
+                        for i, part in enumerate(parts):
+                            if part.lower() == "resourcegroups" and i + 1 < len(parts):
+                                resource_group = parts[i + 1]
+                                break
 
+                    # Skip entries where we couldn't extract any meaningful data.
+                    # This can happen for subscription-level recs that have no
+                    # category/impact in the flattened payload.
+                    if not category and not impact and not problem_text:
+                        skipped += 1
+                        logger.warning(
+                            "Skipping rec %s - could not extract category/impact/description",
+                            resource_id or "?",
+                        )
+                        continue
+
+                    # Return short_description as an OBJECT so the frontend can
+                    # show problem + solution separately. Also provide a flat
+                    # `description` string for simpler consumers.
                     recs.append({
                         "id": resource_id,
-                        "name": rec.name or "",
+                        "name": str(_safe_get(rec, "name", "") or ""),
                         "category": category,
                         "impact": impact,
                         "impacted_field": impacted_field,
                         "impacted_value": impacted_value,
-                        "short_description": short_desc,
+                        "short_description": {
+                            "problem": problem_text,
+                            "solution": solution_text,
+                        },
+                        "description": problem_text,  # flat convenience field
+                        "recommendation_type": rec_type,
                         "extended_properties": ep,
                         "potential_annual_savings": _extract_savings(ep),
                         "resource_group": resource_group,
@@ -233,13 +352,28 @@ def get_advisor_recommendations_with_status(config) -> dict:
                         "sample_data": False,
                     })
                 except Exception as inner:
-                    logger.warning("Skipping recommendation due to parse error: %s", inner)
+                    skipped += 1
+                    # Log the FULL exception including type name so we can see
+                    # what's actually failing.
+                    import traceback as _tb
+                    logger.warning(
+                        "Skipping recommendation due to parse error: %s: %s\n%s",
+                        type(inner).__name__,
+                        inner,
+                        _tb.format_exc().splitlines()[-3:],
+                    )
 
+            if skipped:
+                logger.info("Skipped %d recommendations due to parse errors", skipped)
             logger.info("Retrieved %d advisor recommendations.", len(recs))
+
             return {
                 "recommendations": recs,
                 "data_status": "live" if recs else "empty",
-                "error": None if recs else "Azure Advisor has not generated any recommendations for this subscription yet.",
+                "error": None if recs else (
+                    "Azure Advisor returned no cached recommendations. It may take "
+                    "a few minutes for Azure to populate them. Try refreshing in a bit."
+                ),
                 "error_class": None,
             }
         except Exception as exc:
@@ -252,7 +386,15 @@ def get_advisor_recommendations_with_status(config) -> dict:
                 "error_class": ec,
             }
 
-    return cache.get_or_compute(cache_key, _fetch, ttl=_TTL_ADVISOR)
+    result = cache.get_or_compute(cache_key, _fetch, ttl=_TTL_ADVISOR)
+
+    # Never cache empty results for the full 5 min - they often indicate a
+    # transient state where Azure's own cache is warming up. Shorten TTL to 30s
+    # so the next refresh will retry.
+    if result.get("data_status") in ("empty", "sdk_error", "auth_error"):
+        cache.set(cache_key, result, ttl=30)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
