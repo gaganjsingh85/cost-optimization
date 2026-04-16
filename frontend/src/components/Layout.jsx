@@ -53,10 +53,8 @@ function Layout() {
       <Sidebar />
 
       <div className="flex flex-col flex-1 overflow-hidden">
-        {/* Subscription Header Bar */}
         <SubscriptionBar />
 
-        {/* Setup Banner */}
         {showBanner && (
           <div className="bg-amber-900 border-b border-amber-700 px-4 py-3 flex items-center justify-between flex-shrink-0">
             <div className="flex items-center gap-2">
@@ -83,13 +81,11 @@ function Layout() {
           </div>
         )}
 
-        {/* Main Content */}
         <main className="flex-1 overflow-y-auto bg-gray-900">
           <Outlet context={{ configStatus, refreshConfig: checkConfigStatus }} />
         </main>
       </div>
 
-      {/* Floating Chat Agent (always available) */}
       <ChatAgent />
     </div>
   );

@@ -8,8 +8,15 @@ const WELCOME_MESSAGE = {
     "Hi! I'm your FinOps assistant. Ask me about your Azure spend, M365 licenses, or any cost-optimization question — I can pull live data from your subscription when needed.\n\nTry:\n• *What's my top Azure cost service this month?*\n• *How many unused M365 licenses do I have?*\n• *What would I save by right-sizing VMs?*",
 };
 
+function inlineFormat(text) {
+  const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return escaped
+    .replace(/\*\*(.+?)\*\*/g, '<strong class="text-white">$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code class="bg-gray-800 text-blue-300 px-1 rounded text-xs">$1</code>');
+}
+
 function formatContent(text) {
-  // Lightweight markdown rendering: bold, italic, line breaks, bullets
   if (!text) return null;
   const lines = text.split('\n');
   return lines.map((line, i) => {
@@ -32,19 +39,6 @@ function formatContent(text) {
       />
     );
   });
-}
-
-function inlineFormat(text) {
-  // Escape HTML first
-  const escaped = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-  // Bold **text**
-  return escaped
-    .replace(/\*\*(.+?)\*\*/g, '<strong class="text-white">$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/`([^`]+)`/g, '<code class="bg-gray-800 text-blue-300 px-1 rounded text-xs">$1</code>');
 }
 
 function Message({ msg }) {
@@ -75,7 +69,6 @@ function ChatAgent() {
   const [messages, setMessages] = useState([WELCOME_MESSAGE]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -96,7 +89,6 @@ function ChatAgent() {
     if (!trimmed || sending) return;
 
     const userMsg = { role: 'user', content: trimmed };
-    // Build history excluding the welcome message (which isn't part of real convo)
     const history = messages
       .filter((m) => m !== WELCOME_MESSAGE)
       .map((m) => ({ role: m.role, content: m.content }));
@@ -104,26 +96,17 @@ function ChatAgent() {
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setSending(true);
-    setError(null);
 
     try {
       const result = await sendChatMessage(trimmed, history);
       setMessages((prev) => [
         ...prev,
-        {
-          role: 'assistant',
-          content: result.reply,
-          tools_used: result.tools_used,
-        },
+        { role: 'assistant', content: result.reply, tools_used: result.tools_used },
       ]);
     } catch (err) {
-      setError(err.message);
       setMessages((prev) => [
         ...prev,
-        {
-          role: 'assistant',
-          content: `Sorry, I hit an error: ${err.message}`,
-        },
+        { role: 'assistant', content: `Sorry, I hit an error: ${err.message}` },
       ]);
     } finally {
       setSending(false);
@@ -139,12 +122,10 @@ function ChatAgent() {
 
   const handleReset = () => {
     setMessages([WELCOME_MESSAGE]);
-    setError(null);
   };
 
   return (
     <>
-      {/* Floating Button */}
       {!isOpen && (
         <button
           onClick={() => setIsOpen(true)}
@@ -155,10 +136,8 @@ function ChatAgent() {
         </button>
       )}
 
-      {/* Chat Panel */}
       {isOpen && (
         <div className="fixed bottom-6 right-6 z-40 w-[380px] max-w-[calc(100vw-3rem)] h-[560px] max-h-[calc(100vh-3rem)] bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
-          {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700 bg-gray-800">
             <div className="flex items-center gap-2">
               <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center">
@@ -186,15 +165,13 @@ function ChatAgent() {
             </div>
           </div>
 
-          {/* Messages */}
           <div
             ref={scrollRef}
-            className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-gray-850 bg-gray-900/50"
+            className="flex-1 overflow-y-auto px-4 py-4 space-y-3 bg-gray-900/50"
           >
             {messages.map((msg, idx) => (
               <Message key={idx} msg={msg} />
             ))}
-
             {sending && (
               <div className="flex justify-start">
                 <div className="bg-gray-700 rounded-2xl rounded-bl-md px-3.5 py-2.5 flex items-center gap-2">
@@ -205,7 +182,6 @@ function ChatAgent() {
             )}
           </div>
 
-          {/* Input */}
           <div className="border-t border-gray-700 p-3 bg-gray-800">
             <div className="flex items-end gap-2 bg-gray-700 rounded-xl px-3 py-2 border border-gray-600 focus-within:border-blue-500">
               <textarea

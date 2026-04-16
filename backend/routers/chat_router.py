@@ -1,7 +1,4 @@
-"""
-Chat router for Azure Cost Optimizer API.
-Powers the floating 'Chat with Me' agent.
-"""
+"""Chat router - powers the floating chat agent."""
 
 import logging
 from typing import Literal, Optional
@@ -16,11 +13,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["Chat"])
 
-
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str
-
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
@@ -33,20 +28,12 @@ class ChatResponse(BaseModel):
     error: Optional[str] = None
 
 
-@router.post("/", response_model=ChatResponse, summary="Chat with the FinOps agent")
+@router.post("/", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """
-    Runs one turn of the FinOps chat agent. The agent can call tools to fetch
-    live Azure/M365 data when the user's question requires it.
-    """
     try:
         config = load_config()
         history = [m.dict() for m in request.history]
-        result = chat_service.chat(
-            config=config,
-            user_message=request.message,
-            history=history,
-        )
+        result = chat_service.chat(config=config, user_message=request.message, history=history)
         return ChatResponse(**result)
     except Exception as exc:
         logger.error("Chat endpoint failed: %s", exc)

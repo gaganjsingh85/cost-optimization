@@ -10,8 +10,6 @@ import {
   Tooltip,
   ResponsiveContainer,
   Cell,
-  defs,
-  linearGradient,
 } from 'recharts';
 import {
   DollarSign,
@@ -23,6 +21,7 @@ import {
 } from 'lucide-react';
 import SavingsCard from '../components/SavingsCard';
 import LoadingSpinner from '../components/LoadingSpinner';
+import DataStatusBanner from '../components/DataStatusBanner';
 import { getCostSummary } from '../api/client';
 
 const PERIODS = [
@@ -87,37 +86,45 @@ function CostAnalysis() {
   const [sortField, setSortField] = useState('cost');
   const [sortDir, setSortDir] = useState('desc');
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await getCostSummary(selectedPeriod);
-      setCostData(data);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [selectedPeriod]);
+  const loadData = useCallback(
+    async (forceRefresh = false) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await getCostSummary(
+          selectedPeriod,
+          forceRefresh ? { forceRefresh: true } : undefined
+        );
+        setCostData(data);
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [selectedPeriod]
+  );
 
   useEffect(() => {
     loadData();
   }, [loadData]);
 
   const dailyTrend = useMemo(() => {
-    const trend = costData?.daily_costs || costData?.trend || [];
+    const trend = costData?.daily_trend || [];
     return trend.map((item) => ({
-      date: item.date || item.day || '',
-      cost: parseFloat(item.cost || item.total_cost || 0),
+      date: item.date || '',
+      cost: parseFloat(item.cost || 0),
     }));
   }, [costData]);
 
   const serviceData = useMemo(() => {
-    const services = costData?.by_service || costData?.services || [];
+    const services = costData?.by_service || [];
     return [...services]
       .map((s) => ({
-        name: (s.service_name || s.name || s.service || 'Unknown').replace('Microsoft.', '').replace('microsoft.', ''),
-        cost: parseFloat(s.cost || s.total_cost || 0),
+        name: (s.service_name || 'Unknown')
+          .replace('Microsoft.', '')
+          .replace('microsoft.', ''),
+        cost: parseFloat(s.cost || 0),
         pct: 0,
       }))
       .sort((a, b) => b.cost - a.cost)
@@ -126,21 +133,21 @@ function CostAnalysis() {
 
   const serviceDataWithPct = useMemo(() => {
     const total = serviceData.reduce((s, d) => s + d.cost, 0);
-    return serviceData.map((d) => ({ ...d, pct: total > 0 ? (d.cost / total) * 100 : 0 }));
+    return serviceData.map((d) => ({
+      ...d,
+      pct: total > 0 ? (d.cost / total) * 100 : 0,
+    }));
   }, [serviceData]);
 
   const resourceGroupData = useMemo(() => {
-    const groups = costData?.by_resource_group || costData?.resource_groups || [];
+    const groups = costData?.by_resource_group || [];
     return [...groups]
-      .map((g) => ({
-        name: g.resource_group || g.name || g.group || 'Unknown',
-        cost: parseFloat(g.cost || g.total_cost || 0),
-      }))
+      .map((g) => ({ name: g.resource_group || 'Unknown', cost: parseFloat(g.cost || 0) }))
       .sort((a, b) => b.cost - a.cost)
       .slice(0, 10);
   }, [costData]);
 
-  const totalCost = costData?.total_cost ?? costData?.total ?? null;
+  const totalCost = costData?.total_cost ?? null;
   const topService = serviceData[0]?.name || null;
   const topResourceGroup = resourceGroupData[0]?.name || null;
 
@@ -163,16 +170,12 @@ function CostAnalysis() {
 
   return (
     <div className="p-6 space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold text-white">Azure Cost Analysis</h1>
-          <p className="text-gray-400 text-sm mt-1">
-            Detailed cost breakdown and trend analysis
-          </p>
+          <p className="text-gray-400 text-sm mt-1">Detailed cost breakdown and trend analysis</p>
         </div>
         <div className="flex items-center gap-2">
-          {/* Period Selector */}
           <div className="flex bg-gray-800 border border-gray-700 rounded-lg p-1">
             {PERIODS.map(({ label, value }) => (
               <button
@@ -189,7 +192,7 @@ function CostAnalysis() {
             ))}
           </div>
           <button
-            onClick={loadData}
+            onClick={() => loadData(true)}
             disabled={loading}
             className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-lg"
           >
@@ -198,7 +201,6 @@ function CostAnalysis() {
         </div>
       </div>
 
-      {/* Error */}
       {error && (
         <div className="flex items-center gap-2 bg-red-900/30 border border-red-700 rounded-xl px-4 py-3 text-red-300 text-sm">
           <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -206,7 +208,15 @@ function CostAnalysis() {
         </div>
       )}
 
-      {/* Summary Cards */}
+      {costData && costData.data_status && costData.data_status !== 'live' && (
+        <DataStatusBanner
+          dataStatus={costData.data_status}
+          error={costData.error}
+          errorClass={costData.error_class}
+          source="azure"
+        />
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <SavingsCard
           title={`Total Spend (${selectedPeriod} Days)`}
@@ -233,7 +243,6 @@ function CostAnalysis() {
         />
       </div>
 
-      {/* Daily Cost Trend */}
       <div className="bg-gray-800 border border-gray-700 rounded-xl">
         <div className="px-5 py-4 border-b border-gray-700">
           <h2 className="text-white font-semibold">Daily Cost Trend</h2>
@@ -283,9 +292,7 @@ function CostAnalysis() {
         </div>
       </div>
 
-      {/* Side-by-side charts */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        {/* Cost by Service */}
         <div className="bg-gray-800 border border-gray-700 rounded-xl">
           <div className="px-5 py-4 border-b border-gray-700">
             <h2 className="text-white font-semibold">Cost by Azure Service</h2>
@@ -306,7 +313,11 @@ function CostAnalysis() {
                   layout="vertical"
                   margin={{ top: 5, right: 60, left: 10, bottom: 5 }}
                 >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" horizontal={false} />
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                    stroke="#374151"
+                    horizontal={false}
+                  />
                   <XAxis
                     type="number"
                     tick={{ fill: '#9ca3af', fontSize: 11 }}
@@ -323,7 +334,14 @@ function CostAnalysis() {
                   <Tooltip content={<CustomTooltip />} />
                   <Bar dataKey="cost" radius={[0, 4, 4, 0]}>
                     {serviceData.map((_, i) => (
-                      <Cell key={i} fill={i === 0 ? '#3b82f6' : `rgba(59, 130, 246, ${Math.max(0.3, 1 - i * 0.1)})`} />
+                      <Cell
+                        key={i}
+                        fill={
+                          i === 0
+                            ? '#3b82f6'
+                            : `rgba(59, 130, 246, ${Math.max(0.3, 1 - i * 0.1)})`
+                        }
+                      />
                     ))}
                   </Bar>
                 </BarChart>
@@ -332,7 +350,6 @@ function CostAnalysis() {
           </div>
         </div>
 
-        {/* Cost by Resource Group */}
         <div className="bg-gray-800 border border-gray-700 rounded-xl">
           <div className="px-5 py-4 border-b border-gray-700">
             <h2 className="text-white font-semibold">Cost by Resource Group</h2>
@@ -353,7 +370,11 @@ function CostAnalysis() {
                   layout="vertical"
                   margin={{ top: 5, right: 60, left: 10, bottom: 5 }}
                 >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" horizontal={false} />
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                    stroke="#374151"
+                    horizontal={false}
+                  />
                   <XAxis
                     type="number"
                     tick={{ fill: '#9ca3af', fontSize: 11 }}
@@ -370,7 +391,14 @@ function CostAnalysis() {
                   <Tooltip content={<GreenTooltip />} />
                   <Bar dataKey="cost" radius={[0, 4, 4, 0]}>
                     {resourceGroupData.map((_, i) => (
-                      <Cell key={i} fill={i === 0 ? '#22c55e' : `rgba(34, 197, 94, ${Math.max(0.3, 1 - i * 0.1)})`} />
+                      <Cell
+                        key={i}
+                        fill={
+                          i === 0
+                            ? '#22c55e'
+                            : `rgba(34, 197, 94, ${Math.max(0.3, 1 - i * 0.1)})`
+                        }
+                      />
                     ))}
                   </Bar>
                 </BarChart>
@@ -380,7 +408,6 @@ function CostAnalysis() {
         </div>
       </div>
 
-      {/* Data Table */}
       <div className="bg-gray-800 border border-gray-700 rounded-xl">
         <div className="px-5 py-4 border-b border-gray-700">
           <h2 className="text-white font-semibold">Cost Breakdown by Service</h2>
@@ -427,7 +454,10 @@ function CostAnalysis() {
               </thead>
               <tbody>
                 {sortedTableData.map((row, idx) => (
-                  <tr key={idx} className="border-b border-gray-700/50 hover:bg-gray-700/30">
+                  <tr
+                    key={idx}
+                    className="border-b border-gray-700/50 hover:bg-gray-700/30"
+                  >
                     <td className="px-5 py-3 text-white font-medium">{row.name}</td>
                     <td className="px-4 py-3 text-right text-gray-300 font-mono">
                       {formatCurrencyFull(row.cost)}

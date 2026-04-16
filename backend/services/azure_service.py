@@ -1,278 +1,155 @@
 """
 Azure service layer for Azure Cost Optimizer.
-Fetches Azure Advisor recommendations, cost data, and compute rightsizing info.
-Falls back to sample data when credentials are invalid or API calls fail.
+
+Changes vs earlier version:
+- All expensive calls are cached via services.cache (TTLs: advisor 5min,
+  cost 60s, rightsizing 5min, subscription 10min).
+- Cost Management calls include x-ms-command-name=CostAnalysis which
+  materially reduces 429 throttling.
+- 429 responses honor the x-ms-ratelimit-*-retry-after headers with a
+  single bounded retry.
+- Subscription info uses getattr for tenant_id to handle SDK variance.
+- All functions return a data_status field so the UI can render a clear
+  state instead of silent sample data.
 """
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from services.cache import get_cache
+
 logger = logging.getLogger(__name__)
 
+# Cache TTLs (seconds)
+_TTL_ADVISOR = 300       # 5 min
+_TTL_COST = 60           # 1 min - most volatile
+_TTL_RIGHTSIZING = 300   # 5 min
+_TTL_SUBSCRIPTION = 600  # 10 min
+
+# Extra request headers that reduce 429s on CostManagement
+_COST_HEADERS = {"x-ms-command-name": "CostAnalysis", "ClientType": "CostOptimizer"}
+
+# Retry config for 429
+_MAX_RETRIES = 1      # One retry after 429
+_MAX_WAIT = 30        # Cap on retry-after wait (seconds)
+
+# Headers we inspect for retry-after info
+_RETRY_AFTER_HEADERS = (
+    "x-ms-ratelimit-microsoft.costmanagement-entity-retry-after",
+    "x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after",
+    "x-ms-ratelimit-microsoft.costmanagement-tenant-retry-after",
+    "x-ms-ratelimit-microsoft.costmanagement-client-retry-after",
+    "Retry-After",
+)
+
+
 # ---------------------------------------------------------------------------
-# Sample / demo data used as fallback when real API calls fail
+# Sample / demo data - used ONLY when no config is present
 # ---------------------------------------------------------------------------
 
-_SAMPLE_ADVISOR_RECOMMENDATIONS = [
+_SAMPLE_ADVISOR = [
     {
-        "id": "/subscriptions/demo-sub/providers/Microsoft.Advisor/recommendations/rec-001",
-        "name": "rec-001",
+        "id": "/subscriptions/demo/providers/Microsoft.Advisor/recommendations/demo-1",
+        "name": "demo-1",
         "category": "Cost",
         "impact": "High",
         "impacted_field": "Microsoft.Compute/virtualMachines",
-        "impacted_value": "vm-prod-001",
+        "impacted_value": "vm-demo-001",
         "short_description": "Right-size or shut down underutilized virtual machines",
-        "extended_properties": {
-            "savingsAmount": "147.20",
-            "savingsCurrency": "USD",
-            "annualSavingsAmount": "1766.40",
-        },
+        "extended_properties": {"annualSavingsAmount": "1766.40"},
         "potential_annual_savings": 1766.40,
-        "resource_group": "rg-production",
-        "subscription_id": "demo-subscription-id",
-        "sample_data": True,
-    },
-    {
-        "id": "/subscriptions/demo-sub/providers/Microsoft.Advisor/recommendations/rec-002",
-        "name": "rec-002",
-        "category": "Cost",
-        "impact": "High",
-        "impacted_field": "Microsoft.Sql/servers/databases",
-        "impacted_value": "sql-analytics-db",
-        "short_description": "Buy reserved capacity for Azure SQL Database to save money over pay-as-you-go costs",
-        "extended_properties": {
-            "savingsAmount": "312.50",
-            "savingsCurrency": "USD",
-            "annualSavingsAmount": "3750.00",
-        },
-        "potential_annual_savings": 3750.00,
-        "resource_group": "rg-data",
-        "subscription_id": "demo-subscription-id",
-        "sample_data": True,
-    },
-    {
-        "id": "/subscriptions/demo-sub/providers/Microsoft.Advisor/recommendations/rec-003",
-        "name": "rec-003",
-        "category": "Cost",
-        "impact": "Medium",
-        "impacted_field": "Microsoft.Storage/storageAccounts",
-        "impacted_value": "storagedevlogs",
-        "short_description": "Use Azure Blob Storage access tiers to reduce storage costs",
-        "extended_properties": {
-            "savingsAmount": "28.60",
-            "savingsCurrency": "USD",
-            "annualSavingsAmount": "343.20",
-        },
-        "potential_annual_savings": 343.20,
-        "resource_group": "rg-dev",
-        "subscription_id": "demo-subscription-id",
-        "sample_data": True,
-    },
-    {
-        "id": "/subscriptions/demo-sub/providers/Microsoft.Advisor/recommendations/rec-004",
-        "name": "rec-004",
-        "category": "Security",
-        "impact": "High",
-        "impacted_field": "Microsoft.Compute/virtualMachines",
-        "impacted_value": "vm-legacy-001",
-        "short_description": "Enable Microsoft Defender for servers",
-        "extended_properties": {},
-        "potential_annual_savings": 0.0,
-        "resource_group": "rg-legacy",
-        "subscription_id": "demo-subscription-id",
-        "sample_data": True,
-    },
-    {
-        "id": "/subscriptions/demo-sub/providers/Microsoft.Advisor/recommendations/rec-005",
-        "name": "rec-005",
-        "category": "HighAvailability",
-        "impact": "Medium",
-        "impacted_field": "Microsoft.Compute/virtualMachines",
-        "impacted_value": "vm-prod-002",
-        "short_description": "Enable virtual machine replication to protect your applications from regional outage",
-        "extended_properties": {},
-        "potential_annual_savings": 0.0,
-        "resource_group": "rg-production",
-        "subscription_id": "demo-subscription-id",
-        "sample_data": True,
-    },
-    {
-        "id": "/subscriptions/demo-sub/providers/Microsoft.Advisor/recommendations/rec-006",
-        "name": "rec-006",
-        "category": "Performance",
-        "impact": "Low",
-        "impacted_field": "Microsoft.Sql/servers/databases",
-        "impacted_value": "sql-main-db",
-        "short_description": "Add indexes to improve query performance",
-        "extended_properties": {},
-        "potential_annual_savings": 0.0,
-        "resource_group": "rg-data",
-        "subscription_id": "demo-subscription-id",
-        "sample_data": True,
-    },
-    {
-        "id": "/subscriptions/demo-sub/providers/Microsoft.Advisor/recommendations/rec-007",
-        "name": "rec-007",
-        "category": "Cost",
-        "impact": "Medium",
-        "impacted_field": "Microsoft.Compute/virtualMachines",
-        "impacted_value": "vm-dev-003",
-        "short_description": "Delete or deallocate idle virtual machines",
-        "extended_properties": {
-            "savingsAmount": "65.00",
-            "savingsCurrency": "USD",
-            "annualSavingsAmount": "780.00",
-        },
-        "potential_annual_savings": 780.00,
-        "resource_group": "rg-dev",
-        "subscription_id": "demo-subscription-id",
-        "sample_data": True,
-    },
-    {
-        "id": "/subscriptions/demo-sub/providers/Microsoft.Advisor/recommendations/rec-008",
-        "name": "rec-008",
-        "category": "OperationalExcellence",
-        "impact": "Low",
-        "impacted_field": "Microsoft.Resources/subscriptions/resourceGroups",
-        "impacted_value": "rg-temp-old",
-        "short_description": "Delete unused resource groups to reduce management overhead",
-        "extended_properties": {},
-        "potential_annual_savings": 0.0,
-        "resource_group": "rg-temp-old",
-        "subscription_id": "demo-subscription-id",
+        "resource_group": "rg-demo",
+        "subscription_id": "demo-sub",
         "sample_data": True,
     },
 ]
 
-_SAMPLE_COST_SUMMARY = {
-    "total_cost": 8432.75,
+_SAMPLE_COST = {
+    "total_cost": 0.0,
     "currency": "USD",
     "period_days": 30,
-    "by_service": [
-        {"service_name": "Virtual Machines", "cost": 3245.60},
-        {"service_name": "Azure SQL Database", "cost": 1876.20},
-        {"service_name": "Azure Kubernetes Service", "cost": 1123.45},
-        {"service_name": "Storage Accounts", "cost": 654.30},
-        {"service_name": "Azure Functions", "cost": 412.85},
-        {"service_name": "Cognitive Services", "cost": 387.20},
-        {"service_name": "Virtual Network", "cost": 298.15},
-        {"service_name": "Azure Monitor", "cost": 215.00},
-        {"service_name": "Other", "cost": 220.00},
-    ],
-    "by_resource_group": [
-        {"resource_group": "rg-production", "cost": 4512.30},
-        {"resource_group": "rg-data", "cost": 1987.65},
-        {"resource_group": "rg-dev", "cost": 1234.80},
-        {"resource_group": "rg-staging", "cost": 498.00},
-        {"resource_group": "rg-legacy", "cost": 200.00},
-    ],
-    "by_location": [
-        {"location": "East US", "cost": 4123.40},
-        {"location": "West Europe", "cost": 2876.55},
-        {"location": "Southeast Asia", "cost": 1432.80},
-    ],
-    "daily_trend": [
-        {"date": (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d"),
-         "cost": round(250 + (i % 7) * 30 + (i % 3) * 15, 2)}
-        for i in range(30, 0, -1)
-    ],
+    "by_service": [],
+    "by_resource_group": [],
+    "by_location": [],
+    "daily_trend": [],
     "sample_data": True,
+    "data_status": "sample",
+    "message": "No Azure credentials configured. Go to Settings to connect.",
 }
-
-_SAMPLE_COMPUTE_RIGHTSIZING = [
-    {
-        "vm_name": "vm-prod-001",
-        "resource_group": "rg-production",
-        "location": "East US",
-        "current_size": "Standard_D4s_v3",
-        "current_cost_monthly": 147.20,
-        "recommended_size": "Standard_D2s_v3",
-        "recommended_cost_monthly": 73.60,
-        "monthly_savings": 73.60,
-        "annual_savings": 883.20,
-        "cpu_utilization_avg": "12%",
-        "memory_utilization_avg": "18%",
-        "reason": "CPU and memory utilization below 20% for 30 days. Downsize recommended.",
-        "tags": {"environment": "production", "owner": "team-api"},
-        "sample_data": True,
-    },
-    {
-        "vm_name": "vm-dev-003",
-        "resource_group": "rg-dev",
-        "location": "East US",
-        "current_size": "Standard_D4s_v3",
-        "current_cost_monthly": 147.20,
-        "recommended_size": "Deallocate",
-        "recommended_cost_monthly": 0.0,
-        "monthly_savings": 147.20,
-        "annual_savings": 1766.40,
-        "cpu_utilization_avg": "2%",
-        "memory_utilization_avg": "5%",
-        "reason": "VM appears idle for 30 days. Consider deallocation or deletion.",
-        "tags": {"environment": "dev", "owner": "team-infra"},
-        "sample_data": True,
-    },
-    {
-        "vm_name": "vm-analytics-01",
-        "resource_group": "rg-data",
-        "location": "West Europe",
-        "current_size": "Standard_E8s_v3",
-        "current_cost_monthly": 485.60,
-        "recommended_size": "Standard_E4s_v3",
-        "recommended_cost_monthly": 242.80,
-        "monthly_savings": 242.80,
-        "annual_savings": 2913.60,
-        "cpu_utilization_avg": "22%",
-        "memory_utilization_avg": "35%",
-        "reason": "Memory optimized VM with low CPU. Evaluate if smaller size meets workload needs.",
-        "tags": {"environment": "production", "owner": "team-data"},
-        "sample_data": True,
-    },
-]
 
 _SAMPLE_SUBSCRIPTION = {
     "subscription_id": "demo-subscription-id",
-    "display_name": "Demo Subscription (Sample Data)",
-    "state": "Enabled",
+    "display_name": "Demo Subscription (No credentials)",
+    "state": "Unknown",
     "tenant_id": "demo-tenant-id",
     "sample_data": True,
+    "data_status": "sample",
 }
 
+
 # ---------------------------------------------------------------------------
-# Helper utilities
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Safely converts a value to float."""
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
 
 
-def _extract_savings(extended_properties: dict) -> float:
-    """Extracts potential annual savings from extended_properties dict."""
-    if not extended_properties:
+def _extract_savings(ep: dict) -> float:
+    if not ep:
         return 0.0
     for key in ("annualSavingsAmount", "annualSavings", "savingsAmount"):
-        val = extended_properties.get(key)
-        if val is not None:
-            return _safe_float(val)
+        v = ep.get(key)
+        if v is not None:
+            return _safe_float(v)
     return 0.0
 
 
-# ---------------------------------------------------------------------------
-# Public service functions
-# ---------------------------------------------------------------------------
+def _classify_error(exc: Exception) -> str:
+    msg = str(exc)
+    if "AADSTS700016" in msg:
+        return "auth_app_not_in_tenant"
+    if "AADSTS7000215" in msg or "Invalid client secret" in msg:
+        return "auth_invalid_secret"
+    if "AADSTS50034" in msg:
+        return "auth_tenant_not_found"
+    if "AuthorizationFailed" in msg or "does not have authorization" in msg:
+        return "authz_forbidden"
+    if "SubscriptionNotFound" in msg:
+        return "subscription_not_found"
+    if "429" in msg or "Too many requests" in msg:
+        return "rate_limited"
+    if "No module named" in msg:
+        return "sdk_error"
+    return "unknown"
+
+
+def _extract_retry_after(exc: Exception) -> float:
+    """Tries to extract retry-after seconds from an HttpResponseError."""
+    try:
+        resp = getattr(exc, "response", None)
+        headers = getattr(resp, "headers", None) if resp else None
+        if not headers:
+            return 5.0  # Sensible default
+        for h in _RETRY_AFTER_HEADERS:
+            v = headers.get(h)
+            if v:
+                try:
+                    return min(_MAX_WAIT, float(v))
+                except ValueError:
+                    continue
+    except Exception:
+        pass
+    return 5.0
+
 
 def get_credential(config):
-    """
-    Returns an Azure ClientSecretCredential from the provided config.
-    Raises ImportError-safe wrapper if azure-identity is unavailable.
-    """
     from azure.identity import ClientSecretCredential
-
     return ClientSecretCredential(
         tenant_id=config.azure_tenant_id,
         client_id=config.azure_client_id,
@@ -280,398 +157,435 @@ def get_credential(config):
     )
 
 
+# ---------------------------------------------------------------------------
+# Advisor
+# ---------------------------------------------------------------------------
+
 def get_advisor_recommendations(config) -> list[dict]:
+    """Legacy signature - returns just the list."""
+    return get_advisor_recommendations_with_status(config)["recommendations"]
+
+
+def get_advisor_recommendations_with_status(config) -> dict:
     """
-    Fetches ALL Azure Advisor recommendations across all categories.
-    Returns list of recommendation dicts.
-    Falls back to sample data on any error.
+    Returns {"recommendations": [...], "data_status": str, "error": str|None, "error_class": str|None}.
+    Cached for 5 minutes.
     """
     if not config.has_azure_config():
-        logger.info("No Azure config present - returning sample advisor recommendations.")
-        return _SAMPLE_ADVISOR_RECOMMENDATIONS
+        return {
+            "recommendations": _SAMPLE_ADVISOR,
+            "data_status": "sample",
+            "error": "No Azure credentials configured.",
+        }
 
-    try:
-        from azure.mgmt.advisor import AdvisorManagementClient
+    cache = get_cache()
+    cache_key = f"advisor:{config.azure_subscription_id}"
 
-        credential = get_credential(config)
-        client = AdvisorManagementClient(credential, config.azure_subscription_id)
+    def _fetch() -> dict:
+        try:
+            from azure.mgmt.advisor import AdvisorManagementClient
 
-        recommendations = []
-        for rec in client.recommendations.list():
-            try:
-                props = rec.properties if hasattr(rec, "properties") else {}
-                extended = {}
-                if hasattr(props, "extended_properties") and props.extended_properties:
-                    extended = dict(props.extended_properties)
-                elif isinstance(props, dict):
-                    extended = props.get("extended_properties", {})
+            credential = get_credential(config)
+            client = AdvisorManagementClient(credential, config.azure_subscription_id)
+            recs = []
+            for rec in client.recommendations.list():
+                try:
+                    props = getattr(rec, "properties", None)
+                    if props is None:
+                        continue
 
-                short_desc = ""
-                if hasattr(props, "short_description"):
-                    sd = props.short_description
-                    if hasattr(sd, "solution"):
-                        short_desc = sd.solution or (sd.problem if hasattr(sd, "problem") else "")
-                    elif isinstance(sd, dict):
-                        short_desc = sd.get("solution", sd.get("problem", ""))
+                    ep = {}
+                    if getattr(props, "extended_properties", None):
+                        ep = dict(props.extended_properties)
 
-                category = ""
-                if hasattr(props, "category"):
-                    category = str(props.category) if props.category else ""
+                    short_desc = ""
+                    sd = getattr(props, "short_description", None)
+                    if sd is not None:
+                        solution = getattr(sd, "solution", None)
+                        problem = getattr(sd, "problem", None)
+                        short_desc = solution or problem or ""
 
-                impact = ""
-                if hasattr(props, "impact"):
-                    impact = str(props.impact) if props.impact else ""
+                    category = str(getattr(props, "category", "") or "")
+                    impact = str(getattr(props, "impact", "") or "")
+                    impacted_field = getattr(props, "impacted_field", "") or ""
+                    impacted_value = getattr(props, "impacted_value", "") or ""
 
-                impacted_field = ""
-                impacted_value = ""
-                if hasattr(props, "impacted_field"):
-                    impacted_field = props.impacted_field or ""
-                if hasattr(props, "impacted_value"):
-                    impacted_value = props.impacted_value or ""
+                    resource_id = rec.id or ""
+                    resource_group = ""
+                    parts = resource_id.split("/")
+                    if "resourceGroups" in parts:
+                        idx = parts.index("resourceGroups")
+                        if idx + 1 < len(parts):
+                            resource_group = parts[idx + 1]
 
-                resource_id = rec.id or ""
-                resource_group = ""
-                parts = resource_id.split("/")
-                if "resourceGroups" in parts:
-                    idx = parts.index("resourceGroups")
-                    if idx + 1 < len(parts):
-                        resource_group = parts[idx + 1]
+                    recs.append({
+                        "id": resource_id,
+                        "name": rec.name or "",
+                        "category": category,
+                        "impact": impact,
+                        "impacted_field": impacted_field,
+                        "impacted_value": impacted_value,
+                        "short_description": short_desc,
+                        "extended_properties": ep,
+                        "potential_annual_savings": _extract_savings(ep),
+                        "resource_group": resource_group,
+                        "subscription_id": config.azure_subscription_id,
+                        "sample_data": False,
+                    })
+                except Exception as inner:
+                    logger.warning("Skipping recommendation due to parse error: %s", inner)
 
-                recommendations.append({
-                    "id": resource_id,
-                    "name": rec.name or "",
-                    "category": category,
-                    "impact": impact,
-                    "impacted_field": impacted_field,
-                    "impacted_value": impacted_value,
-                    "short_description": short_desc,
-                    "extended_properties": extended,
-                    "potential_annual_savings": _extract_savings(extended),
-                    "resource_group": resource_group,
-                    "subscription_id": config.azure_subscription_id,
-                    "sample_data": False,
-                })
-            except Exception as inner_exc:
-                logger.warning("Skipping recommendation due to parse error: %s", inner_exc)
+            logger.info("Retrieved %d advisor recommendations.", len(recs))
+            return {
+                "recommendations": recs,
+                "data_status": "live" if recs else "empty",
+                "error": None if recs else "Azure Advisor has not generated any recommendations for this subscription yet.",
+                "error_class": None,
+            }
+        except Exception as exc:
+            ec = _classify_error(exc)
+            logger.error("Failed to fetch advisor recommendations (%s): %s", ec, exc)
+            return {
+                "recommendations": [],
+                "data_status": "auth_error" if ec.startswith("auth") or ec == "authz_forbidden" else "sdk_error",
+                "error": str(exc),
+                "error_class": ec,
+            }
+
+    return cache.get_or_compute(cache_key, _fetch, ttl=_TTL_ADVISOR)
+
+
+# ---------------------------------------------------------------------------
+# Cost Management
+# ---------------------------------------------------------------------------
+
+def _run_cost_query(client, scope: str, body_dict: dict):
+    """
+    Wrapper around client.query.usage that handles one 429 retry using the
+    retry-after header. Adds x-ms-command-name header.
+    """
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            return client.query.usage(
+                scope=scope,
+                parameters=body_dict,
+                headers=_COST_HEADERS,
+            )
+        except Exception as exc:
+            msg = str(exc)
+            if "429" in msg or "Too many requests" in msg:
+                if attempt >= _MAX_RETRIES:
+                    raise
+                wait_s = _extract_retry_after(exc)
+                logger.warning(
+                    "CostManagement 429; retrying once after %.1fs (attempt %d)",
+                    wait_s, attempt + 1,
+                )
+                time.sleep(wait_s)
                 continue
-
-        logger.info("Retrieved %d advisor recommendations.", len(recommendations))
-        return recommendations
-
-    except Exception as exc:
-        logger.error("Failed to fetch advisor recommendations: %s", exc)
-        return _SAMPLE_ADVISOR_RECOMMENDATIONS
+            raise
+    # Unreachable
+    return None
 
 
 def get_cost_summary(config, days: int = 30) -> dict:
     """
-    Fetches actual cost data for the last N days using Azure Cost Management.
-    Returns aggregated cost summary dict.
-    Falls back to sample data on any error.
+    Fetches cost data with aggressive caching. On 429, returns empty payload
+    with data_status='rate_limited' so the UI can show a friendly message.
     """
     if not config.has_azure_config():
-        logger.info("No Azure config present - returning sample cost summary.")
-        result = dict(_SAMPLE_COST_SUMMARY)
+        result = dict(_SAMPLE_COST)
         result["period_days"] = days
         return result
 
-    try:
-        from azure.mgmt.costmanagement import CostManagementClient
-        from azure.mgmt.costmanagement.models import (
-            QueryDefinition,
-            QueryTimePeriod,
-            QueryDataset,
-            QueryAggregation,
-            QueryGrouping,
-        )
+    cache = get_cache()
+    cache_key = f"cost_summary:{config.azure_subscription_id}:{days}"
 
-        credential = get_credential(config)
-        client = CostManagementClient(credential)
-
-        end_date = datetime.now(timezone.utc)
-        start_date = end_date - timedelta(days=days)
-        scope = f"/subscriptions/{config.azure_subscription_id}"
-
-        # Query total cost by service name
-        def _run_query(grouping_name: str, grouping_type: str = "Dimension") -> list:
-            query = QueryDefinition(
-                type="ActualCost",
-                timeframe="Custom",
-                time_period=QueryTimePeriod(
-                    from_property=start_date,
-                    to=end_date,
-                ),
-                dataset=QueryDataset(
-                    granularity="None",
-                    aggregation={
-                        "totalCost": QueryAggregation(
-                            name="Cost",
-                            function="Sum",
-                        )
-                    },
-                    grouping=[
-                        QueryGrouping(
-                            type=grouping_type,
-                            name=grouping_name,
-                        )
-                    ],
-                ),
-            )
-            result = client.query.usage(scope=scope, parameters=query)
-            rows = result.rows or []
-            columns = [c.name.lower() for c in (result.columns or [])]
-            items = []
-            for row in rows:
-                row_dict = dict(zip(columns, row))
-                items.append(row_dict)
-            return items
-
-        # Query total
-        total_query = QueryDefinition(
-            type="ActualCost",
-            timeframe="Custom",
-            time_period=QueryTimePeriod(
-                from_property=start_date,
-                to=end_date,
-            ),
-            dataset=QueryDataset(
-                granularity="None",
-                aggregation={
-                    "totalCost": QueryAggregation(name="Cost", function="Sum")
-                },
-            ),
-        )
-        total_result = client.query.usage(scope=scope, parameters=total_query)
-        total_cost = 0.0
-        currency = "USD"
-        if total_result.rows:
-            total_cost = _safe_float(total_result.rows[0][0])
-        if total_result.columns and len(total_result.columns) > 1:
-            # currency column is usually index 1
-            if total_result.rows:
-                currency = str(total_result.rows[0][1]) if len(total_result.rows[0]) > 1 else "USD"
-
-        # By service
-        service_rows = _run_query("ServiceName")
-        by_service = [
-            {"service_name": str(r.get("servicename", r.get("ServiceName", "Unknown"))),
-             "cost": _safe_float(r.get("totalcost", r.get("cost", 0)))}
-            for r in service_rows
-        ]
-        by_service.sort(key=lambda x: x["cost"], reverse=True)
-
-        # By resource group
-        rg_rows = _run_query("ResourceGroupName")
-        by_resource_group = [
-            {"resource_group": str(r.get("resourcegroupname", r.get("ResourceGroupName", "Unknown"))),
-             "cost": _safe_float(r.get("totalcost", r.get("cost", 0)))}
-            for r in rg_rows
-        ]
-        by_resource_group.sort(key=lambda x: x["cost"], reverse=True)
-
-        # By location
-        loc_rows = _run_query("ResourceLocation")
-        by_location = [
-            {"location": str(r.get("resourcelocation", r.get("ResourceLocation", "Unknown"))),
-             "cost": _safe_float(r.get("totalcost", r.get("cost", 0)))}
-            for r in loc_rows
-        ]
-        by_location.sort(key=lambda x: x["cost"], reverse=True)
-
-        # Daily trend
-        daily_query = QueryDefinition(
-            type="ActualCost",
-            timeframe="Custom",
-            time_period=QueryTimePeriod(
-                from_property=start_date,
-                to=end_date,
-            ),
-            dataset=QueryDataset(
-                granularity="Daily",
-                aggregation={
-                    "totalCost": QueryAggregation(name="Cost", function="Sum")
-                },
-            ),
-        )
-        daily_result = client.query.usage(scope=scope, parameters=daily_query)
-        daily_trend = []
-        if daily_result.rows:
-            date_col_idx = None
-            cost_col_idx = None
-            if daily_result.columns:
-                for i, col in enumerate(daily_result.columns):
-                    name_lower = col.name.lower()
-                    if "date" in name_lower or "usagedate" in name_lower:
-                        date_col_idx = i
-                    elif "cost" in name_lower or "pretaxcost" in name_lower:
-                        cost_col_idx = i
-            for row in daily_result.rows:
-                date_val = str(row[date_col_idx]) if date_col_idx is not None else ""
-                cost_val = _safe_float(row[cost_col_idx]) if cost_col_idx is not None else 0.0
-                # Date may be integer like 20240101 or string
-                if date_val.isdigit() and len(date_val) == 8:
-                    date_val = f"{date_val[:4]}-{date_val[4:6]}-{date_val[6:8]}"
-                daily_trend.append({"date": date_val, "cost": cost_val})
-        daily_trend.sort(key=lambda x: x["date"])
-
+    def _empty_with_error(err: str, err_class: str, data_status: str = "auth_error") -> dict:
         return {
-            "total_cost": round(total_cost, 2),
-            "currency": currency,
+            "total_cost": 0.0,
+            "currency": "USD",
             "period_days": days,
-            "by_service": by_service,
-            "by_resource_group": by_resource_group,
-            "by_location": by_location,
-            "daily_trend": daily_trend,
+            "by_service": [],
+            "by_resource_group": [],
+            "by_location": [],
+            "daily_trend": [],
             "sample_data": False,
+            "data_status": data_status,
+            "error": err,
+            "error_class": err_class,
         }
 
-    except Exception as exc:
-        logger.error("Failed to fetch cost summary: %s", exc)
-        result = dict(_SAMPLE_COST_SUMMARY)
-        result["period_days"] = days
-        return result
+    def _fetch() -> dict:
+        try:
+            from azure.mgmt.costmanagement import CostManagementClient
+            from azure.mgmt.costmanagement.models import (
+                QueryDefinition,
+                QueryTimePeriod,
+                QueryDataset,
+                QueryAggregation,
+                QueryGrouping,
+            )
 
+            credential = get_credential(config)
+            client = CostManagementClient(credential)
+
+            end_date = datetime.now(timezone.utc)
+            start_date = end_date - timedelta(days=days)
+            scope = f"/subscriptions/{config.azure_subscription_id}"
+
+            def _make_grouped_query(grouping_name: str) -> QueryDefinition:
+                return QueryDefinition(
+                    type="ActualCost",
+                    timeframe="Custom",
+                    time_period=QueryTimePeriod(from_property=start_date, to=end_date),
+                    dataset=QueryDataset(
+                        granularity="None",
+                        aggregation={"totalCost": QueryAggregation(name="Cost", function="Sum")},
+                        grouping=[QueryGrouping(type="Dimension", name=grouping_name)],
+                    ),
+                )
+
+            # Run queries one at a time with small delay between each to stay
+            # well under the 4-calls-per-minute CostManagement limit.
+            def _run_and_parse(grouping: str) -> list:
+                result = _run_cost_query(client, scope, _make_grouped_query(grouping))
+                rows = result.rows or []
+                columns = [c.name.lower() for c in (result.columns or [])]
+                return [dict(zip(columns, row)) for row in rows]
+
+            service_rows = _run_and_parse("ServiceName")
+            rg_rows = _run_and_parse("ResourceGroupName")
+            loc_rows = _run_and_parse("ResourceLocation")
+
+            by_service = sorted([
+                {"service_name": str(r.get("servicename", "Unknown")),
+                 "cost": _safe_float(r.get("totalcost", r.get("cost", 0)))}
+                for r in service_rows
+            ], key=lambda x: x["cost"], reverse=True)
+
+            by_resource_group = sorted([
+                {"resource_group": str(r.get("resourcegroupname", r.get("resourcegroup", "Unknown"))),
+                 "cost": _safe_float(r.get("totalcost", r.get("cost", 0)))}
+                for r in rg_rows
+            ], key=lambda x: x["cost"], reverse=True)
+
+            by_location = sorted([
+                {"location": str(r.get("resourcelocation", "Unknown")),
+                 "cost": _safe_float(r.get("totalcost", r.get("cost", 0)))}
+                for r in loc_rows
+            ], key=lambda x: x["cost"], reverse=True)
+
+            # Total cost = sum of service costs (avoids an extra API call)
+            total_cost = sum(s["cost"] for s in by_service)
+
+            # Daily trend - one more query. If it 429s we still return partial.
+            daily_trend = []
+            try:
+                daily_def = QueryDefinition(
+                    type="ActualCost",
+                    timeframe="Custom",
+                    time_period=QueryTimePeriod(from_property=start_date, to=end_date),
+                    dataset=QueryDataset(
+                        granularity="Daily",
+                        aggregation={"totalCost": QueryAggregation(name="Cost", function="Sum")},
+                    ),
+                )
+                daily_result = _run_cost_query(client, scope, daily_def)
+                if daily_result.rows and daily_result.columns:
+                    date_idx = cost_idx = None
+                    for i, col in enumerate(daily_result.columns):
+                        nl = col.name.lower()
+                        if "date" in nl or "usagedate" in nl:
+                            date_idx = i
+                        elif "cost" in nl or "pretaxcost" in nl:
+                            cost_idx = i
+                    for row in daily_result.rows:
+                        date_val = str(row[date_idx]) if date_idx is not None else ""
+                        cost_val = _safe_float(row[cost_idx]) if cost_idx is not None else 0.0
+                        if date_val.isdigit() and len(date_val) == 8:
+                            date_val = f"{date_val[:4]}-{date_val[4:6]}-{date_val[6:8]}"
+                        daily_trend.append({"date": date_val, "cost": cost_val})
+                    daily_trend.sort(key=lambda x: x["date"])
+            except Exception as daily_exc:
+                logger.warning("Daily trend query failed (non-fatal): %s", daily_exc)
+
+            has_data = total_cost > 0 or by_service or by_resource_group
+            return {
+                "total_cost": round(total_cost, 2),
+                "currency": "USD",
+                "period_days": days,
+                "by_service": by_service,
+                "by_resource_group": by_resource_group,
+                "by_location": by_location,
+                "daily_trend": daily_trend,
+                "sample_data": False,
+                "data_status": "live" if has_data else "empty",
+                "message": None if has_data else "No cost data returned for this period.",
+            }
+
+        except Exception as exc:
+            ec = _classify_error(exc)
+            logger.error("Failed to fetch cost summary (%s): %s", ec, exc)
+            if ec == "rate_limited":
+                return _empty_with_error(
+                    "Azure Cost Management is rate-limiting this subscription. Data will refresh in a minute.",
+                    ec,
+                    "rate_limited",
+                )
+            status = "auth_error" if ec.startswith("auth") or ec == "authz_forbidden" else "sdk_error"
+            return _empty_with_error(str(exc), ec, status)
+
+    result = cache.get_or_compute(cache_key, _fetch, ttl=_TTL_COST)
+    # Don't cache rate-limited or error results for the full 60s - let them retry sooner
+    if result.get("data_status") in ("rate_limited", "sdk_error", "auth_error"):
+        # Shorten TTL by pre-expiring if currently cached with full TTL
+        # We just invalidate so next call retries after ~15s via a short TTL
+        cache.set(cache_key, result, ttl=15)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Compute right-sizing
+# ---------------------------------------------------------------------------
 
 def get_compute_rightsizing(config) -> list[dict]:
-    """
-    Lists VMs and returns rightsizing recommendations based on size and tags.
-    Falls back to sample data on any error.
-    """
     if not config.has_azure_config():
-        logger.info("No Azure config present - returning sample compute rightsizing data.")
-        return _SAMPLE_COMPUTE_RIGHTSIZING
+        return []
 
-    try:
-        from azure.mgmt.compute import ComputeManagementClient
+    cache = get_cache()
+    cache_key = f"rightsizing:{config.azure_subscription_id}"
 
-        credential = get_credential(config)
-        compute_client = ComputeManagementClient(credential, config.azure_subscription_id)
+    def _fetch() -> list:
+        try:
+            from azure.mgmt.compute import ComputeManagementClient
 
-        # Size-to-monthly-cost estimates (USD, approximate East US pricing)
-        size_cost_map = {
-            "Standard_B1s": 7.59, "Standard_B1ms": 15.19, "Standard_B2s": 30.37,
-            "Standard_B2ms": 60.74, "Standard_B4ms": 121.47, "Standard_B8ms": 242.94,
-            "Standard_D1_v2": 52.56, "Standard_D2_v2": 105.12, "Standard_D4_v2": 210.24,
-            "Standard_D2s_v3": 73.00, "Standard_D4s_v3": 146.00, "Standard_D8s_v3": 292.00,
-            "Standard_D16s_v3": 584.00, "Standard_D32s_v3": 1168.00,
-            "Standard_D2as_v4": 70.08, "Standard_D4as_v4": 140.16, "Standard_D8as_v4": 280.32,
-            "Standard_E2s_v3": 101.18, "Standard_E4s_v3": 202.36, "Standard_E8s_v3": 404.72,
-            "Standard_F2s_v2": 61.78, "Standard_F4s_v2": 123.56, "Standard_F8s_v2": 247.12,
-        }
+            credential = get_credential(config)
+            compute_client = ComputeManagementClient(credential, config.azure_subscription_id)
 
-        # Downsize map: current -> recommended smaller size
-        downsize_map = {
-            "Standard_D4s_v3": "Standard_D2s_v3",
-            "Standard_D8s_v3": "Standard_D4s_v3",
-            "Standard_D16s_v3": "Standard_D8s_v3",
-            "Standard_D32s_v3": "Standard_D16s_v3",
-            "Standard_E4s_v3": "Standard_E2s_v3",
-            "Standard_E8s_v3": "Standard_E4s_v3",
-            "Standard_D4as_v4": "Standard_D2as_v4",
-            "Standard_D8as_v4": "Standard_D4as_v4",
-            "Standard_B4ms": "Standard_B2ms",
-            "Standard_B8ms": "Standard_B4ms",
-            "Standard_F4s_v2": "Standard_F2s_v2",
-            "Standard_F8s_v2": "Standard_F4s_v2",
-        }
+            size_cost_map = {
+                "Standard_B1s": 7.59, "Standard_B1ms": 15.19, "Standard_B2s": 30.37,
+                "Standard_B2ms": 60.74, "Standard_B4ms": 121.47, "Standard_B8ms": 242.94,
+                "Standard_D2s_v3": 73.00, "Standard_D4s_v3": 146.00, "Standard_D8s_v3": 292.00,
+                "Standard_D16s_v3": 584.00, "Standard_D32s_v3": 1168.00,
+                "Standard_D2as_v4": 70.08, "Standard_D4as_v4": 140.16, "Standard_D8as_v4": 280.32,
+                "Standard_E2s_v3": 101.18, "Standard_E4s_v3": 202.36, "Standard_E8s_v3": 404.72,
+                "Standard_F2s_v2": 61.78, "Standard_F4s_v2": 123.56, "Standard_F8s_v2": 247.12,
+            }
+            downsize_map = {
+                "Standard_D4s_v3": "Standard_D2s_v3",
+                "Standard_D8s_v3": "Standard_D4s_v3",
+                "Standard_D16s_v3": "Standard_D8s_v3",
+                "Standard_D32s_v3": "Standard_D16s_v3",
+                "Standard_E4s_v3": "Standard_E2s_v3",
+                "Standard_E8s_v3": "Standard_E4s_v3",
+                "Standard_D4as_v4": "Standard_D2as_v4",
+                "Standard_D8as_v4": "Standard_D4as_v4",
+                "Standard_B4ms": "Standard_B2ms",
+                "Standard_B8ms": "Standard_B4ms",
+                "Standard_F4s_v2": "Standard_F2s_v2",
+                "Standard_F8s_v2": "Standard_F4s_v2",
+            }
 
-        recommendations = []
-        vms = list(compute_client.virtual_machines.list_all())
+            recs = []
+            for vm in compute_client.virtual_machines.list_all():
+                try:
+                    vm_size = str(vm.hardware_profile.vm_size) if vm.hardware_profile and vm.hardware_profile.vm_size else ""
+                    resource_id = vm.id or ""
+                    resource_group = ""
+                    parts = resource_id.split("/")
+                    if "resourceGroups" in parts:
+                        idx = parts.index("resourceGroups")
+                        if idx + 1 < len(parts):
+                            resource_group = parts[idx + 1]
 
-        for vm in vms:
-            try:
-                vm_size = ""
-                if vm.hardware_profile and vm.hardware_profile.vm_size:
-                    vm_size = str(vm.hardware_profile.vm_size)
+                    current_cost = size_cost_map.get(vm_size, 0.0)
+                    recommended_size = downsize_map.get(vm_size)
+                    if not recommended_size:
+                        continue
+                    recommended_cost = size_cost_map.get(recommended_size, current_cost * 0.5)
+                    monthly_savings = current_cost - recommended_cost
+                    if monthly_savings <= 0:
+                        continue
 
-                resource_id = vm.id or ""
-                resource_group = ""
-                parts = resource_id.split("/")
-                if "resourceGroups" in parts:
-                    idx = parts.index("resourceGroups")
-                    if idx + 1 < len(parts):
-                        resource_group = parts[idx + 1]
+                    recs.append({
+                        "vm_name": vm.name or "",
+                        "resource_group": resource_group,
+                        "location": vm.location or "unknown",
+                        "current_size": vm_size,
+                        "current_cost_monthly": round(current_cost, 2),
+                        "recommended_size": recommended_size,
+                        "recommended_cost_monthly": round(recommended_cost, 2),
+                        "monthly_savings": round(monthly_savings, 2),
+                        "annual_savings": round(monthly_savings * 12, 2),
+                        "cpu_utilization_avg": "N/A",
+                        "memory_utilization_avg": "N/A",
+                        "reason": (
+                            f"VM is running {vm_size}. Downsizing to {recommended_size} "
+                            f"could save ${monthly_savings:.2f}/month. Verify utilization first."
+                        ),
+                        "tags": dict(vm.tags) if vm.tags else {},
+                        "sample_data": False,
+                    })
+                except Exception as inner:
+                    logger.warning("Skipping VM due to parse error: %s", inner)
 
-                location = vm.location or "unknown"
-                tags = dict(vm.tags) if vm.tags else {}
-                current_cost = size_cost_map.get(vm_size, 0.0)
-                recommended_size = downsize_map.get(vm_size)
+            logger.info("Generated %d compute rightsizing recommendations.", len(recs))
+            return sorted(recs, key=lambda x: x["annual_savings"], reverse=True)
 
-                if not recommended_size:
-                    continue
+        except Exception as exc:
+            logger.error("Failed to fetch compute rightsizing: %s", exc)
+            return []
 
-                recommended_cost = size_cost_map.get(recommended_size, current_cost * 0.5)
-                monthly_savings = current_cost - recommended_cost
-                annual_savings = monthly_savings * 12
+    return cache.get_or_compute(cache_key, _fetch, ttl=_TTL_RIGHTSIZING)
 
-                if monthly_savings <= 0:
-                    continue
 
-                recommendations.append({
-                    "vm_name": vm.name or "",
-                    "resource_group": resource_group,
-                    "location": location,
-                    "current_size": vm_size,
-                    "current_cost_monthly": round(current_cost, 2),
-                    "recommended_size": recommended_size,
-                    "recommended_cost_monthly": round(recommended_cost, 2),
-                    "monthly_savings": round(monthly_savings, 2),
-                    "annual_savings": round(annual_savings, 2),
-                    "cpu_utilization_avg": "N/A (metrics require Azure Monitor integration)",
-                    "memory_utilization_avg": "N/A",
-                    "reason": (
-                        f"VM is running {vm_size}. Based on size analysis, downsizing to "
-                        f"{recommended_size} could save ${monthly_savings:.2f}/month. "
-                        "Verify CPU/memory utilization before acting."
-                    ),
-                    "tags": tags,
-                    "sample_data": False,
-                })
-            except Exception as inner_exc:
-                logger.warning("Skipping VM due to parse error: %s", inner_exc)
-                continue
+# ---------------------------------------------------------------------------
+# Subscription info
+# ---------------------------------------------------------------------------
 
-        logger.info("Generated %d compute rightsizing recommendations.", len(recommendations))
-        if not recommendations:
-            logger.info("No rightsizing candidates found - returning sample data.")
-            return _SAMPLE_COMPUTE_RIGHTSIZING
-
-        return sorted(recommendations, key=lambda x: x["annual_savings"], reverse=True)
-
-    except Exception as exc:
-        logger.error("Failed to fetch compute rightsizing data: %s", exc)
-        return _SAMPLE_COMPUTE_RIGHTSIZING
-    
 def get_subscription_info(config) -> dict:
-    """
-    Fetches the Azure subscription display name, ID, state, and tenant ID.
-    Falls back to sample data when credentials are missing or the call fails.
-    """
     if not config.has_azure_config():
-        logger.info("No Azure config present - returning sample subscription info.")
         return _SAMPLE_SUBSCRIPTION
- 
-    try:
-        from azure.mgmt.subscription import SubscriptionClient
- 
-        credential = get_credential(config)
-        client = SubscriptionClient(credential)
-        sub = client.subscriptions.get(config.azure_subscription_id)
- 
-        return {
-            "subscription_id": sub.subscription_id or config.azure_subscription_id,
-            "display_name": sub.display_name or "Unnamed Subscription",
-            "state": str(sub.state) if sub.state else "Unknown",
-            "tenant_id": sub.tenant_id or config.azure_tenant_id,
-            "sample_data": False,
-        }
-    except Exception as exc:
-        logger.error("Failed to fetch subscription info: %s", exc)
-        return {
-            "subscription_id": config.azure_subscription_id or "unknown",
-            "display_name": "Unable to fetch subscription name",
-            "state": "Unknown",
-            "tenant_id": config.azure_tenant_id or "unknown",
-            "sample_data": False,
-            "error": str(exc),
-        }
+
+    cache = get_cache()
+    cache_key = f"subscription:{config.azure_subscription_id}"
+
+    def _fetch() -> dict:
+        try:
+            from azure.mgmt.subscription import SubscriptionClient
+
+            credential = get_credential(config)
+            client = SubscriptionClient(credential)
+            sub = client.subscriptions.get(config.azure_subscription_id)
+
+            # Different SDK versions expose tenant_id differently - use getattr
+            tenant_id = (
+                getattr(sub, "tenant_id", None)
+                or getattr(sub, "tenantId", None)
+                or config.azure_tenant_id
+            )
+
+            return {
+                "subscription_id": getattr(sub, "subscription_id", None) or config.azure_subscription_id,
+                "display_name": getattr(sub, "display_name", None) or "Unnamed Subscription",
+                "state": str(getattr(sub, "state", "") or "Unknown"),
+                "tenant_id": tenant_id,
+                "sample_data": False,
+                "data_status": "live",
+            }
+        except Exception as exc:
+            ec = _classify_error(exc)
+            logger.error("Failed to fetch subscription info (%s): %s", ec, exc)
+            return {
+                "subscription_id": config.azure_subscription_id or "unknown",
+                "display_name": "Unable to fetch subscription name",
+                "state": "Unknown",
+                "tenant_id": config.azure_tenant_id or "unknown",
+                "sample_data": False,
+                "data_status": "auth_error" if ec.startswith("auth") else "sdk_error",
+                "error": str(exc),
+                "error_class": ec,
+            }
+
+    return cache.get_or_compute(cache_key, _fetch, ttl=_TTL_SUBSCRIPTION)

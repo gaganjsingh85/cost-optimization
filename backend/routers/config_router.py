@@ -1,11 +1,10 @@
 """
-Config router for Azure Cost Optimizer API.
-Handles reading, writing, and deleting configuration.
+Config router. Handles read/write/delete of credentials.
 
-GET /api/config/         -> returns non-secret fields in plaintext + boolean flags for secrets
-GET /api/config/status   -> returns only boolean flags (legacy / header use)
-POST /api/config/        -> merges a partial payload into the saved config
-DELETE /api/config/      -> deletes the saved config file
+GET /api/config/        -> plaintext non-secrets + boolean flags for secrets
+GET /api/config/status  -> boolean flags only
+POST /api/config/       -> merges partial payload; empty-string = keep existing
+DELETE /api/config/     -> deletes config file
 """
 
 import logging
@@ -15,42 +14,33 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from config import load_config, delete_config_file, Config
+from services.cache import get_cache
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/config", tags=["Configuration"])
 
 
-# ---------------------------------------------------------------------------
-# Request / Response models
-# ---------------------------------------------------------------------------
-
 class ConfigUpdateRequest(BaseModel):
-    azure_tenant_id: Optional[str] = Field(None, description="Azure tenant ID")
-    azure_client_id: Optional[str] = Field(None, description="Azure client (application) ID")
-    azure_client_secret: Optional[str] = Field(None, description="Azure client secret")
-    azure_subscription_id: Optional[str] = Field(None, description="Azure subscription ID")
-    m365_tenant_id: Optional[str] = Field(None, description="M365 / Entra tenant ID")
-    m365_client_id: Optional[str] = Field(None, description="M365 application client ID")
-    m365_client_secret: Optional[str] = Field(None, description="M365 application client secret")
-    anthropic_api_key: Optional[str] = Field(None, description="Anthropic API key")
+    azure_tenant_id: Optional[str] = None
+    azure_client_id: Optional[str] = None
+    azure_client_secret: Optional[str] = None
+    azure_subscription_id: Optional[str] = None
+    m365_tenant_id: Optional[str] = None
+    m365_client_id: Optional[str] = None
+    m365_client_secret: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
 
 
 class ConfigReadResponse(BaseModel):
-    """Plaintext response for non-secret fields; booleans for secrets."""
-    # Non-secrets (plaintext)
     azure_tenant_id: Optional[str] = None
     azure_client_id: Optional[str] = None
     azure_subscription_id: Optional[str] = None
     m365_tenant_id: Optional[str] = None
     m365_client_id: Optional[str] = None
-
-    # Secrets (boolean presence only)
     azure_client_secret_set: bool = False
     m365_client_secret_set: bool = False
     anthropic_api_key_set: bool = False
-
-    # Overall flags
     has_azure: bool = False
     has_m365: bool = False
     has_anthropic: bool = False
@@ -62,17 +52,8 @@ class ConfigStatusResponse(BaseModel):
     has_anthropic: bool
 
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
-
-@router.get("/", response_model=ConfigReadResponse, summary="Get current config")
+@router.get("/", response_model=ConfigReadResponse)
 async def get_config():
-    """
-    Returns the current non-secret configuration fields in plaintext so the
-    Settings UI can populate its form. Secret fields are returned as boolean
-    flags only (*_set) to indicate whether they have a value.
-    """
     config = load_config()
     return ConfigReadResponse(
         azure_tenant_id=config.azure_tenant_id,
@@ -89,9 +70,8 @@ async def get_config():
     )
 
 
-@router.get("/status", response_model=ConfigStatusResponse, summary="Get config presence flags only")
+@router.get("/status", response_model=ConfigStatusResponse)
 async def get_config_status():
-    """Returns only boolean flags - lightweight check for Layout/header."""
     config = load_config()
     return ConfigStatusResponse(
         has_azure=config.has_azure_config(),
@@ -100,19 +80,12 @@ async def get_config_status():
     )
 
 
-@router.post("/", summary="Save configuration")
+@router.post("/")
 async def save_config(request: ConfigUpdateRequest):
-    """
-    Accepts a full or partial configuration payload.
-    Merges with existing config and saves to config.json.
-    Empty-string values are treated as "no change" so the UI can safely send
-    a blank secret field when the user hasn't typed anything new.
-    """
     try:
         existing = load_config()
 
-        def _merge(new_val: Optional[str], existing_val: Optional[str]) -> Optional[str]:
-            # Treat None or empty string as "keep existing"
+        def _merge(new_val, existing_val):
             if new_val is None or new_val == "":
                 return existing_val
             return new_val
@@ -127,8 +100,14 @@ async def save_config(request: ConfigUpdateRequest):
             m365_client_secret=_merge(request.m365_client_secret, existing.m365_client_secret),
             anthropic_api_key=_merge(request.anthropic_api_key, existing.anthropic_api_key),
         )
-
         updated.save_to_file()
+
+        # Credentials may have changed - blow away caches so next request refreshes
+        cache = get_cache()
+        for prefix in ("advisor:", "cost_summary:", "rightsizing:", "subscription:",
+                       "m365_token:", "m365_license_summary:", "m365_activity:",
+                       "m365_app_usage:"):
+            cache.invalidate_prefix(prefix)
 
         return {
             "success": True,
@@ -142,14 +121,19 @@ async def save_config(request: ConfigUpdateRequest):
         raise HTTPException(status_code=500, detail=f"Failed to save configuration: {exc}")
 
 
-@router.delete("/", summary="Delete saved configuration")
+@router.delete("/")
 async def delete_config():
-    """Deletes config.json. After deletion the app falls back to environment variables."""
     try:
         deleted = delete_config_file()
-        if deleted:
-            return {"success": True, "message": "Configuration file deleted successfully."}
-        return {"success": True, "message": "No configuration file found - nothing to delete."}
+        cache = get_cache()
+        for prefix in ("advisor:", "cost_summary:", "rightsizing:", "subscription:",
+                       "m365_token:", "m365_license_summary:", "m365_activity:",
+                       "m365_app_usage:"):
+            cache.invalidate_prefix(prefix)
+        return {
+            "success": True,
+            "message": "Configuration file deleted." if deleted else "No config file found.",
+        }
     except Exception as exc:
         logger.error("Failed to delete config: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to delete configuration: {exc}")

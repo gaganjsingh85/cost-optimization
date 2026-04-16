@@ -1,7 +1,4 @@
-"""
-Configuration management for Azure Cost Optimizer.
-Loads from config.json if present, falls back to .env / environment variables.
-"""
+"""Configuration management - loads from config.json or .env / environment variables."""
 
 import json
 import os
@@ -10,15 +7,12 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-# Load .env file if present
 load_dotenv()
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
 
 
 class Config:
-    """Configuration class for Azure Cost Optimizer."""
-
     def __init__(
         self,
         azure_tenant_id: Optional[str] = None,
@@ -40,7 +34,6 @@ class Config:
         self.anthropic_api_key = anthropic_api_key
 
     def has_azure_config(self) -> bool:
-        """Returns True if all required Azure configuration fields are present."""
         return all([
             self.azure_tenant_id,
             self.azure_client_id,
@@ -49,19 +42,12 @@ class Config:
         ])
 
     def has_m365_config(self) -> bool:
-        """Returns True if all required M365 configuration fields are present."""
-        return all([
-            self.m365_tenant_id,
-            self.m365_client_id,
-            self.m365_client_secret,
-        ])
+        return all([self.m365_tenant_id, self.m365_client_id, self.m365_client_secret])
 
     def has_anthropic_config(self) -> bool:
-        """Returns True if the Anthropic API key is present."""
         return bool(self.anthropic_api_key)
 
     def save_to_file(self) -> None:
-        """Saves the current configuration to config.json."""
         data = {
             "azure_tenant_id": self.azure_tenant_id,
             "azure_client_id": self.azure_client_id,
@@ -76,7 +62,6 @@ class Config:
             json.dump(data, f, indent=2)
 
     def to_dict(self) -> dict:
-        """Returns config as a dictionary."""
         return {
             "azure_tenant_id": self.azure_tenant_id,
             "azure_client_id": self.azure_client_id,
@@ -90,7 +75,6 @@ class Config:
 
 
 def _load_from_file() -> dict:
-    """Loads configuration from config.json if it exists."""
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, "r") as f:
@@ -100,36 +84,28 @@ def _load_from_file() -> dict:
     return {}
 
 
-def _get_env(key: str, file_data: dict, env_key: str) -> Optional[str]:
-    """Gets a config value: prefer file_data, fall back to env var."""
-    value = file_data.get(key)
-    if value:
-        return value
+def _get(key: str, file_data: dict, env_key: str) -> Optional[str]:
+    val = file_data.get(key)
+    if val:
+        return val
     return os.environ.get(env_key) or None
 
 
 def load_config() -> Config:
-    """
-    Returns a Config instance populated from config.json if present,
-    falling back to environment variables / .env file.
-    Config is loaded fresh each call so runtime changes are picked up.
-    """
     file_data = _load_from_file()
-
     return Config(
-        azure_tenant_id=_get_env("azure_tenant_id", file_data, "AZURE_TENANT_ID"),
-        azure_client_id=_get_env("azure_client_id", file_data, "AZURE_CLIENT_ID"),
-        azure_client_secret=_get_env("azure_client_secret", file_data, "AZURE_CLIENT_SECRET"),
-        azure_subscription_id=_get_env("azure_subscription_id", file_data, "AZURE_SUBSCRIPTION_ID"),
-        m365_tenant_id=_get_env("m365_tenant_id", file_data, "M365_TENANT_ID"),
-        m365_client_id=_get_env("m365_client_id", file_data, "M365_CLIENT_ID"),
-        m365_client_secret=_get_env("m365_client_secret", file_data, "M365_CLIENT_SECRET"),
-        anthropic_api_key=_get_env("anthropic_api_key", file_data, "ANTHROPIC_API_KEY"),
+        azure_tenant_id=_get("azure_tenant_id", file_data, "AZURE_TENANT_ID"),
+        azure_client_id=_get("azure_client_id", file_data, "AZURE_CLIENT_ID"),
+        azure_client_secret=_get("azure_client_secret", file_data, "AZURE_CLIENT_SECRET"),
+        azure_subscription_id=_get("azure_subscription_id", file_data, "AZURE_SUBSCRIPTION_ID"),
+        m365_tenant_id=_get("m365_tenant_id", file_data, "M365_TENANT_ID"),
+        m365_client_id=_get("m365_client_id", file_data, "M365_CLIENT_ID"),
+        m365_client_secret=_get("m365_client_secret", file_data, "M365_CLIENT_SECRET"),
+        anthropic_api_key=_get("anthropic_api_key", file_data, "ANTHROPIC_API_KEY"),
     )
 
 
 def delete_config_file() -> bool:
-    """Deletes the config.json file if it exists. Returns True if deleted."""
     if CONFIG_FILE.exists():
         CONFIG_FILE.unlink()
         return True

@@ -1,18 +1,19 @@
-fastapi==0.110.0
-uvicorn[standard]==0.27.1
-python-dotenv==1.0.1
-anthropic==0.40.0
-azure-identity==1.15.0
-azure-mgmt-advisor==9.0.0
-azure-mgmt-costmanagement==4.0.1
-azure-mgmt-subscription==3.1.1
-azure-mgmt-compute==30.6.0
-azure-mgmt-resource==23.0.1
-msal==1.27.0
-requests==2.31.0
-pydantic==2.4.2
-pydantic-core==2.10.1
-pydantic-settings==2.2.1
-python-multipart==0.0.9
-aiohttp==3.9.3
-six==1.17.0
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# Azure SDK
+azure-identity>=1.15.0
+azure-mgmt-advisor>=9.0.0
+azure-mgmt-costmanagement>=4.0.1
+azure-mgmt-compute>=30.0.0
+azure-mgmt-subscription>=3.1.1
+six>=1.16.0
+
+# Microsoft Graph auth
+msal>=1.24.0
+
+# Anthropic (Claude API) - needs modern version for httpx 0.28+ compatibility
+anthropic>=0.40.0

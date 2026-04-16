@@ -9,7 +9,6 @@ function SubscriptionBar() {
 
   useEffect(() => {
     let cancelled = false;
-
     (async () => {
       try {
         const data = await getSubscriptionInfo();
@@ -20,7 +19,6 @@ function SubscriptionBar() {
         if (!cancelled) setLoading(false);
       }
     })();
-
     return () => {
       cancelled = true;
     };
@@ -39,7 +37,7 @@ function SubscriptionBar() {
 
   if (loading) {
     return (
-      <div className="h-12 bg-gray-850 bg-gray-800/70 border-b border-gray-700 px-4 flex items-center">
+      <div className="h-12 bg-gray-800/70 border-b border-gray-700 px-4 flex items-center">
         <div className="h-4 w-64 bg-gray-700 rounded animate-pulse" />
       </div>
     );
@@ -54,13 +52,8 @@ function SubscriptionBar() {
     );
   }
 
-  const {
-    display_name,
-    subscription_id,
-    state,
-    tenant_id,
-    sample_data,
-  } = info;
+  const { display_name, subscription_id, state, tenant_id, sample_data, data_status } = info;
+  const isAuthError = data_status === 'auth_error' || data_status === 'sdk_error';
 
   return (
     <div className="h-12 bg-gray-800/70 backdrop-blur-sm border-b border-gray-700 px-4 flex items-center gap-3 flex-shrink-0">
@@ -70,11 +63,9 @@ function SubscriptionBar() {
       </div>
 
       <div className="flex items-center gap-2 min-w-0">
-        <span className="text-white font-semibold text-sm truncate max-w-xs">
-          {display_name}
-        </span>
+        <span className="text-white font-semibold text-sm truncate max-w-xs">{display_name}</span>
 
-        {state && (
+        {state && state !== 'Unknown' && (
           <span
             className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-full border ${
               state === 'Enabled'
@@ -91,6 +82,12 @@ function SubscriptionBar() {
             Demo Data
           </span>
         )}
+
+        {isAuthError && (
+          <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-full bg-red-900/30 text-red-300 border border-red-700/50">
+            Auth Error
+          </span>
+        )}
       </div>
 
       <div className="flex items-center gap-1.5 ml-2 min-w-0">
@@ -103,11 +100,15 @@ function SubscriptionBar() {
           className="p-1 text-gray-500 hover:text-gray-200 rounded"
           title="Copy subscription ID"
         >
-          {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
+          {copied ? (
+            <Check className="w-3.5 h-3.5 text-green-400" />
+          ) : (
+            <Copy className="w-3.5 h-3.5" />
+          )}
         </button>
       </div>
 
-      {tenant_id && (
+      {tenant_id && tenant_id !== 'unknown' && (
         <div className="hidden lg:flex items-center gap-1.5 ml-auto">
           <span className="text-gray-500 text-xs">Tenant:</span>
           <code className="text-gray-500 text-xs font-mono truncate max-w-[200px]">

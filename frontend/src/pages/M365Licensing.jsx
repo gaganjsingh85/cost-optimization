@@ -1,12 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import {
-  PieChart,
-  Pie,
-  Cell,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
-} from 'recharts';
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import {
   Users,
   DollarSign,
@@ -19,11 +12,18 @@ import {
 } from 'lucide-react';
 import SavingsCard from '../components/SavingsCard';
 import LoadingSpinner from '../components/LoadingSpinner';
-import { getM365Licenses, getM365Summary } from '../api/client';
+import DataStatusBanner from '../components/DataStatusBanner';
+import { getM365Summary } from '../api/client';
 
 const PIE_COLORS = [
-  '#3b82f6', '#8b5cf6', '#22c55e', '#f59e0b', '#ef4444',
-  '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#a78bfa',
+  '#3b82f6',
+  '#8b5cf6',
+  '#22c55e',
+  '#f59e0b',
+  '#ef4444',
+  '#06b6d4',
+  '#ec4899',
+  '#84cc16',
 ];
 
 function formatCurrency(value) {
@@ -38,9 +38,7 @@ function formatCurrency(value) {
 
 function UtilizationBar({ used, total }) {
   const pct = total > 0 ? (used / total) * 100 : 0;
-  const color =
-    pct >= 80 ? 'bg-green-500' : pct >= 50 ? 'bg-yellow-500' : 'bg-red-500';
-
+  const color = pct >= 80 ? 'bg-green-500' : pct >= 50 ? 'bg-yellow-500' : 'bg-red-500';
   return (
     <div className="flex items-center gap-2">
       <div className="flex-1 bg-gray-700 rounded-full h-2 min-w-16">
@@ -73,28 +71,14 @@ const CustomPieTooltip = ({ active, payload }) => {
 function M365Licensing() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [licenses, setLicenses] = useState([]);
   const [summary, setSummary] = useState(null);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (forceRefresh = false) => {
     setLoading(true);
     setError(null);
-
     try {
-      const [licRes, sumRes] = await Promise.allSettled([
-        getM365Licenses(),
-        getM365Summary(),
-      ]);
-
-      if (licRes.status === 'fulfilled') {
-        setLicenses(licRes.value?.licenses || licRes.value || []);
-      } else {
-        throw licRes.reason;
-      }
-
-      if (sumRes.status === 'fulfilled') {
-        setSummary(sumRes.value);
-      }
+      const sum = await getM365Summary(forceRefresh ? { forceRefresh: true } : undefined);
+      setSummary(sum);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -106,45 +90,34 @@ function M365Licensing() {
     loadData();
   }, [loadData]);
 
+  const licenses = useMemo(() => summary?.licenses || [], [summary]);
+
   const stats = useMemo(() => {
-    const totalMonthly = licenses.reduce((s, l) => s + (l.monthly_cost || 0), 0);
-    const unusedCost = licenses.reduce(
-      (s, l) => s + ((l.unused_count || Math.max(0, (l.purchased_count || 0) - (l.active_count || 0))) * (l.unit_price || 0)),
-      0
-    );
-    const activeUsers = licenses.reduce((s, l) => s + (l.active_count || l.used || 0), 0);
+    const totalMonthly = summary?.total_monthly_spend_estimate ?? 0;
+    const unusedCost = summary?.potential_savings ?? 0;
+    const activeUsers = licenses.reduce((s, l) => s + (l.consumed_units || 0), 0);
     const inactiveUsers = licenses.reduce(
-      (s, l) =>
-        s +
-        Math.max(
-          0,
-          (l.purchased_count || l.total || 0) - (l.active_count || l.used || 0)
-        ),
+      (s, l) => s + Math.max(0, (l.enabled_units || 0) - (l.consumed_units || 0)),
       0
     );
     return { totalMonthly, unusedCost, activeUsers, inactiveUsers };
-  }, [licenses]);
+  }, [licenses, summary]);
 
   const pieData = useMemo(() => {
     return licenses
-      .filter((l) => (l.monthly_cost || 0) > 0)
       .map((l) => ({
-        name: (l.sku_name || l.license_name || l.name || 'Unknown').replace('Microsoft 365', 'M365'),
-        value: parseFloat(l.monthly_cost || 0),
+        name: (l.friendly_name || l.sku_part_number || 'Unknown').replace('Microsoft 365', 'M365'),
+        value: (l.consumed_units || 0) * (l.unit_cost_estimate || 0),
       }))
+      .filter((d) => d.value > 0)
       .sort((a, b) => b.value - a.value)
       .slice(0, 8);
   }, [licenses]);
 
-  const recommendations =
-    summary?.recommendations ||
-    summary?.optimization_recommendations ||
-    summary?.insights ||
-    [];
+  const recommendations = summary?.recommendations || [];
 
   return (
     <div className="p-6 space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">M365 License Optimization</h1>
@@ -153,7 +126,7 @@ function M365Licensing() {
           </p>
         </div>
         <button
-          onClick={loadData}
+          onClick={() => loadData(true)}
           disabled={loading}
           className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-lg text-sm font-medium"
         >
@@ -162,7 +135,6 @@ function M365Licensing() {
         </button>
       </div>
 
-      {/* Error */}
       {error && (
         <div className="flex items-center gap-2 bg-red-900/30 border border-red-700 rounded-xl px-4 py-3 text-red-300 text-sm">
           <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -170,12 +142,20 @@ function M365Licensing() {
         </div>
       )}
 
-      {/* Summary Cards */}
+      {summary && summary.data_status && summary.data_status !== 'live' && (
+        <DataStatusBanner
+          dataStatus={summary.data_status}
+          error={summary.error}
+          errorClass={summary.error_class}
+          source="m365"
+        />
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <SavingsCard
           title="Total Monthly Spend"
           value={loading ? null : formatCurrency(stats.totalMonthly)}
-          subtitle="All M365 licenses"
+          subtitle="Based on consumed licenses"
           icon={DollarSign}
           color="blue"
           loading={loading}
@@ -189,26 +169,24 @@ function M365Licensing() {
           loading={loading}
         />
         <SavingsCard
-          title="Active Users"
+          title="Active Assignments"
           value={loading ? null : stats.activeUsers.toLocaleString()}
-          subtitle="Assigned licenses"
+          subtitle="Consumed seats"
           icon={UserCheck}
           color="gray"
           loading={loading}
         />
         <SavingsCard
-          title="Inactive Users"
+          title="Unassigned Seats"
           value={loading ? null : stats.inactiveUsers.toLocaleString()}
-          subtitle="Unassigned licenses"
+          subtitle="Purchased but not assigned"
           icon={UserX}
           color="red"
           loading={loading}
         />
       </div>
 
-      {/* License Table + Pie Chart */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        {/* License Table */}
         <div className="xl:col-span-2 bg-gray-800 border border-gray-700 rounded-xl">
           <div className="px-5 py-4 border-b border-gray-700">
             <h2 className="text-white font-semibold">License Utilization</h2>
@@ -221,7 +199,7 @@ function M365Licensing() {
             <div className="p-8 text-center text-gray-500">
               <Users className="w-10 h-10 mx-auto mb-2 opacity-30" />
               <p className="text-sm">No license data available</p>
-              <p className="text-xs mt-1">Configure M365 credentials in Settings</p>
+              <p className="text-xs mt-1">See the banner above for the reason.</p>
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -230,8 +208,8 @@ function M365Licensing() {
                   <tr className="border-b border-gray-700">
                     <th className="text-left text-gray-400 font-medium px-5 py-3">License</th>
                     <th className="text-right text-gray-400 font-medium px-3 py-3">Purchased</th>
-                    <th className="text-right text-gray-400 font-medium px-3 py-3">Active</th>
-                    <th className="text-right text-gray-400 font-medium px-3 py-3">Inactive</th>
+                    <th className="text-right text-gray-400 font-medium px-3 py-3">Assigned</th>
+                    <th className="text-right text-gray-400 font-medium px-3 py-3">Unassigned</th>
                     <th className="text-gray-400 font-medium px-3 py-3 min-w-32">Usage</th>
                     <th className="text-right text-gray-400 font-medium px-3 py-3">Monthly</th>
                     <th className="text-right text-gray-400 font-medium px-5 py-3">Unused Cost</th>
@@ -239,34 +217,52 @@ function M365Licensing() {
                 </thead>
                 <tbody>
                   {licenses.map((lic, idx) => {
-                    const purchased = lic.purchased_count || lic.total || 0;
-                    const active = lic.active_count || lic.used || 0;
-                    const inactive = Math.max(0, purchased - active);
-                    const unusedCost = inactive * (lic.unit_price || 0);
-                    const utilPct = purchased > 0 ? (active / purchased) * 100 : 0;
+                    const purchased = lic.enabled_units || 0;
+                    const consumed = lic.consumed_units || 0;
+                    const unused = lic.unused_units ?? Math.max(0, purchased - consumed);
+                    const unitCost = lic.unit_cost_estimate || 0;
+                    const monthlyCost = consumed * unitCost;
+                    const unusedCost = lic.unused_cost_estimate ?? unused * unitCost;
 
                     return (
-                      <tr key={lic.sku_id || idx} className="border-b border-gray-700/50 hover:bg-gray-700/30">
+                      <tr
+                        key={lic.sku_id || idx}
+                        className="border-b border-gray-700/50 hover:bg-gray-700/30"
+                      >
                         <td className="px-5 py-3">
                           <p className="text-white font-medium text-xs leading-tight">
-                            {lic.sku_name || lic.license_name || lic.name || 'Unknown'}
+                            {lic.friendly_name || lic.sku_part_number || 'Unknown license'}
                           </p>
-                          {lic.sku_id && (
-                            <p className="text-gray-600 text-xs font-mono mt-0.5">{lic.sku_id}</p>
+                          {lic.sku_part_number && lic.friendly_name !== lic.sku_part_number && (
+                            <p className="text-gray-600 text-xs font-mono mt-0.5">
+                              {lic.sku_part_number}
+                            </p>
                           )}
                         </td>
-                        <td className="px-3 py-3 text-gray-300 text-right">{purchased.toLocaleString()}</td>
-                        <td className="px-3 py-3 text-green-400 text-right font-medium">{active.toLocaleString()}</td>
-                        <td className={`px-3 py-3 text-right font-medium ${inactive > 0 ? 'text-red-400' : 'text-gray-500'}`}>
-                          {inactive.toLocaleString()}
+                        <td className="px-3 py-3 text-gray-300 text-right">
+                          {purchased.toLocaleString()}
+                        </td>
+                        <td className="px-3 py-3 text-green-400 text-right font-medium">
+                          {consumed.toLocaleString()}
+                        </td>
+                        <td
+                          className={`px-3 py-3 text-right font-medium ${
+                            unused > 0 ? 'text-red-400' : 'text-gray-500'
+                          }`}
+                        >
+                          {unused.toLocaleString()}
                         </td>
                         <td className="px-3 py-3">
-                          <UtilizationBar used={active} total={purchased} />
+                          <UtilizationBar used={consumed} total={purchased} />
                         </td>
                         <td className="px-3 py-3 text-gray-300 text-right">
-                          {formatCurrency(lic.monthly_cost || 0)}
+                          {formatCurrency(monthlyCost)}
                         </td>
-                        <td className={`px-5 py-3 text-right font-semibold ${unusedCost > 0 ? 'text-red-400' : 'text-gray-500'}`}>
+                        <td
+                          className={`px-5 py-3 text-right font-semibold ${
+                            unusedCost > 0 ? 'text-red-400' : 'text-gray-500'
+                          }`}
+                        >
                           {unusedCost > 0 ? formatCurrency(unusedCost) : '—'}
                         </td>
                       </tr>
@@ -278,7 +274,6 @@ function M365Licensing() {
           )}
         </div>
 
-        {/* Pie Chart */}
         <div className="bg-gray-800 border border-gray-700 rounded-xl">
           <div className="px-5 py-4 border-b border-gray-700">
             <h2 className="text-white font-semibold">Spend Distribution</h2>
@@ -321,7 +316,6 @@ function M365Licensing() {
         </div>
       </div>
 
-      {/* Recommendations */}
       {recommendations.length > 0 && (
         <div className="bg-gray-800 border border-gray-700 rounded-xl">
           <div className="px-5 py-4 border-b border-gray-700">
@@ -331,33 +325,28 @@ function M365Licensing() {
             </h2>
           </div>
           <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
-            {recommendations.map((rec, idx) => {
-              const title = rec.title || rec.recommendation || (typeof rec === 'string' ? rec : 'Recommendation');
-              const description = rec.description || rec.details || '';
-              const savings = rec.savings || rec.estimated_savings || rec.monthly_savings;
-
-              return (
-                <div
-                  key={idx}
-                  className="bg-gray-700/50 border border-gray-600 rounded-xl p-4 flex flex-col gap-2"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
-                      <p className="text-white text-sm font-medium">{title}</p>
-                    </div>
-                    {savings && (
-                      <span className="text-green-400 font-semibold text-sm whitespace-nowrap flex-shrink-0">
-                        {formatCurrency(savings)}/mo
-                      </span>
-                    )}
+            {recommendations.map((rec, idx) => (
+              <div
+                key={idx}
+                className="bg-gray-700/50 border border-gray-600 rounded-xl p-4 flex flex-col gap-2"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
+                    <p className="text-white text-sm font-medium">{rec.title}</p>
                   </div>
-                  {description && (
-                    <p className="text-gray-400 text-xs leading-relaxed ml-6">{description}</p>
+                  {rec.monthly_savings && (
+                    <span className="text-green-400 font-semibold text-sm whitespace-nowrap flex-shrink-0">
+                      {formatCurrency(rec.monthly_savings)}/mo
+                    </span>
                   )}
                 </div>
-              );
-            })}
+                {rec.description && (
+                  <p className="text-gray-400 text-xs leading-relaxed ml-6">{rec.description}</p>
+                )}
+                {rec.action && <p className="text-blue-400 text-xs ml-6 mt-1">→ {rec.action}</p>}
+              </div>
+            ))}
           </div>
         </div>
       )}

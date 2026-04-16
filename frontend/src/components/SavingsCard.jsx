@@ -2,50 +2,15 @@ import React from 'react';
 import { TrendingDown, TrendingUp, Minus } from 'lucide-react';
 
 const COLOR_THEMES = {
-  blue: {
-    bg: 'bg-blue-900/20',
-    border: 'border-blue-800/50',
-    icon: 'text-blue-400 bg-blue-900/30',
-    value: 'text-blue-100',
-  },
-  green: {
-    bg: 'bg-green-900/20',
-    border: 'border-green-800/50',
-    icon: 'text-green-400 bg-green-900/30',
-    value: 'text-green-100',
-  },
-  red: {
-    bg: 'bg-red-900/20',
-    border: 'border-red-800/50',
-    icon: 'text-red-400 bg-red-900/30',
-    value: 'text-red-100',
-  },
-  purple: {
-    bg: 'bg-purple-900/20',
-    border: 'border-purple-800/50',
-    icon: 'text-purple-400 bg-purple-900/30',
-    value: 'text-purple-100',
-  },
-  gray: {
-    bg: 'bg-gray-800',
-    border: 'border-gray-700',
-    icon: 'text-gray-400 bg-gray-700',
-    value: 'text-white',
-  },
+  blue: { bg: 'bg-blue-900/20', border: 'border-blue-800/50', icon: 'text-blue-400 bg-blue-900/30', value: 'text-blue-100' },
+  green: { bg: 'bg-green-900/20', border: 'border-green-800/50', icon: 'text-green-400 bg-green-900/30', value: 'text-green-100' },
+  red: { bg: 'bg-red-900/20', border: 'border-red-800/50', icon: 'text-red-400 bg-red-900/30', value: 'text-red-100' },
+  purple: { bg: 'bg-purple-900/20', border: 'border-purple-800/50', icon: 'text-purple-400 bg-purple-900/30', value: 'text-purple-100' },
+  gray: { bg: 'bg-gray-800', border: 'border-gray-700', icon: 'text-gray-400 bg-gray-700', value: 'text-white' },
 };
 
-function SavingsCard({
-  title,
-  value,
-  subtitle,
-  icon: Icon,
-  color = 'gray',
-  trend = null,
-  trendValue = null,
-  loading = false,
-}) {
+function SavingsCard({ title, value, subtitle, icon: Icon, color = 'gray', trend = null, trendValue = null, loading = false }) {
   const theme = COLOR_THEMES[color] || COLOR_THEMES.gray;
-
   const TrendIcon = trend === 'up' ? TrendingUp : trend === 'down' ? TrendingDown : Minus;
   const trendColor =
     trend === 'down' ? 'text-green-400' : trend === 'up' ? 'text-red-400' : 'text-gray-400';
@@ -67,7 +32,6 @@ function SavingsCard({
           </div>
         )}
       </div>
-
       {(subtitle || trendValue) && (
         <div className="flex items-center gap-2">
           {trendValue && (
@@ -76,9 +40,7 @@ function SavingsCard({
               {trendValue}
             </div>
           )}
-          {subtitle && (
-            <p className="text-gray-500 text-xs">{subtitle}</p>
-          )}
+          {subtitle && <p className="text-gray-500 text-xs">{subtitle}</p>}
         </div>
       )}
     </div>

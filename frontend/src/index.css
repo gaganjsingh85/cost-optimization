@@ -9,6 +9,7 @@ body {
 
 ::-webkit-scrollbar {
   width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -31,7 +32,6 @@ body {
   transition-duration: 150ms;
 }
 
-/* Override for elements that shouldn't have transitions */
 .no-transition,
 .no-transition * {
   transition: none !important;

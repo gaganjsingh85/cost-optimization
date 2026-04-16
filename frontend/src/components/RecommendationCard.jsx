@@ -33,7 +33,6 @@ function formatCurrency(value) {
 
 function RecommendationCard({ recommendation, compact = false }) {
   const [expanded, setExpanded] = useState(false);
-
   if (!recommendation) return null;
 
   const {
@@ -41,31 +40,32 @@ function RecommendationCard({ recommendation, compact = false }) {
     category,
     short_description,
     extended_properties,
-    resource_metadata,
-    description,
-    potential_benefits,
+    impacted_value,
+    resource_group,
+    potential_annual_savings,
   } = recommendation;
 
   const impactStyle = IMPACT_STYLES[impact] || IMPACT_STYLES.Low;
   const categoryStyle = CATEGORY_STYLES[category] || CATEGORY_STYLES.default;
   const categoryLabel = CATEGORY_LABELS[category] || category;
 
-  const monthlySavings =
-    extended_properties?.annualSavingsAmount
-      ? extended_properties.annualSavingsAmount / 12
-      : extended_properties?.savingsAmount || null;
+  // Handle both short_description as object (new) or as string (from backend)
+  const problemText =
+    (short_description && typeof short_description === 'object'
+      ? short_description.problem
+      : short_description) || 'No description available';
 
-  const problemText = short_description?.problem || description || 'No description available';
-  const solutionText = short_description?.solution || potential_benefits || '';
-  const resourceName =
-    resource_metadata?.resourceName ||
-    recommendation.impacted_resource ||
-    recommendation.resource_id ||
-    '';
+  const solutionText =
+    (short_description && typeof short_description === 'object'
+      ? short_description.solution
+      : '') || '';
+
+  const monthlySavings = potential_annual_savings ? potential_annual_savings / 12 : null;
+
+  const resourceName = impacted_value || '';
 
   return (
     <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 hover:border-gray-600 transition-colors">
-      {/* Header */}
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="flex flex-wrap items-center gap-2">
           <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${impactStyle}`}>
@@ -83,19 +83,19 @@ function RecommendationCard({ recommendation, compact = false }) {
         )}
       </div>
 
-      {/* Title */}
       <p className="text-white text-sm font-medium leading-snug mb-2">{problemText}</p>
 
-      {/* Resource */}
-      {resourceName && (
+      {(resourceName || resource_group) && (
         <div className="flex items-center gap-1.5 text-gray-400 text-xs mb-3">
           <Server className="w-3.5 h-3.5 flex-shrink-0" />
-          <span className="truncate font-mono">{resourceName}</span>
+          <span className="truncate font-mono">
+            {resourceName}
+            {resource_group ? ` (${resource_group})` : ''}
+          </span>
         </div>
       )}
 
-      {/* Expand/Collapse */}
-      {(solutionText || description) && !compact && (
+      {solutionText && !compact && (
         <>
           <button
             onClick={() => setExpanded(!expanded)}
@@ -113,20 +113,20 @@ function RecommendationCard({ recommendation, compact = false }) {
               </>
             )}
           </button>
-
           {expanded && (
             <div className="mt-3 pt-3 border-t border-gray-700">
-              {solutionText && (
-                <div className="mb-2">
-                  <p className="text-xs text-gray-400 font-medium mb-1">Recommended Action:</p>
-                  <p className="text-sm text-gray-300 leading-relaxed">{solutionText}</p>
-                </div>
-              )}
+              <p className="text-xs text-gray-400 font-medium mb-1">Recommended Action:</p>
+              <p className="text-sm text-gray-300 leading-relaxed">{solutionText}</p>
               {extended_properties?.currentSku && (
                 <p className="text-xs text-gray-500 mt-2">
-                  Current SKU: <span className="text-gray-400">{extended_properties.currentSku}</span>
+                  Current SKU:{' '}
+                  <span className="text-gray-400">{extended_properties.currentSku}</span>
                   {extended_properties.targetSku && (
-                    <> &rarr; Recommended: <span className="text-gray-400">{extended_properties.targetSku}</span></>
+                    <>
+                      {' '}
+                      → Recommended:{' '}
+                      <span className="text-gray-400">{extended_properties.targetSku}</span>
+                    </>
                   )}
                 </p>
               )}

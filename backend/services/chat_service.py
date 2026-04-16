@@ -1,10 +1,4 @@
-"""
-Chat service for the Azure Cost Optimizer.
-
-Powers the floating "Chat with Me" agent. Uses Claude with tool use so the
-model can fetch live Azure/M365 data on demand rather than preloading
-everything into every turn.
-"""
+"""Chat service - Claude conversational agent with tool use."""
 
 import json
 import logging
@@ -24,125 +18,92 @@ Guidelines:
 - Quantify savings in USD with both monthly and annual figures when relevant.
 - When you use tool data, cite specific resource names, SKUs, or counts.
 - If a tool returns sample data (marked with "sample_data": true), tell the user the numbers are from demo data and that they should configure real credentials in Settings for accurate figures.
-- If the user asks about a recommendation, explain the business rationale, the risk, and a validation step before acting.
+- If a tool returns a data_status of "auth_error" or "rate_limited", explain the issue plainly and suggest what to fix.
 - Use markdown formatting (bold, bullet points) sparingly and only where it genuinely aids readability.
 - Do not call the same tool more than once per turn unless the user's question genuinely needs different parameters.
 """
 
-
-# ---------------------------------------------------------------------------
-# Tool definitions exposed to Claude
-# ---------------------------------------------------------------------------
-
 CHAT_TOOLS = [
     {
         "name": "get_azure_cost_summary",
-        "description": (
-            "Get the user's Azure cost summary for a given time window. Returns "
-            "total cost, cost broken down by service, resource group, and location, "
-            "plus a daily cost trend. Use this when the user asks about Azure spend, "
-            "top services, or cost trends."
-        ),
+        "description": "Get Azure cost summary for a given period. Use for Azure spend, top services, cost trends.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "days": {
-                    "type": "integer",
-                    "description": "Number of days to look back (1-365). Default 30.",
-                    "minimum": 1,
-                    "maximum": 365,
-                }
+                "days": {"type": "integer", "minimum": 1, "maximum": 365, "description": "Days to look back (default 30)."}
             },
             "required": [],
         },
     },
     {
         "name": "get_azure_advisor_recommendations",
-        "description": (
-            "Get Azure Advisor recommendations across Cost, Security, High "
-            "Availability, Performance, and Operational Excellence categories. "
-            "Use this when the user asks what Azure could save, what Advisor "
-            "suggests, or about specific optimization opportunities."
-        ),
+        "description": "Get Azure Advisor recommendations across all categories. Use for savings opportunities.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "category": {
-                    "type": "string",
-                    "enum": [
-                        "Cost",
-                        "Security",
-                        "HighAvailability",
-                        "Performance",
-                        "OperationalExcellence",
-                    ],
-                    "description": "Optional category filter.",
-                }
+                "category": {"type": "string", "enum": ["Cost", "Security", "HighAvailability", "Performance", "OperationalExcellence"]}
             },
             "required": [],
         },
     },
     {
         "name": "get_azure_compute_rightsizing",
-        "description": (
-            "Get VM right-sizing recommendations with current size, recommended "
-            "size, and projected monthly savings. Use this when the user asks "
-            "about specific VMs, right-sizing, or underutilized compute."
-        ),
+        "description": "Get VM right-sizing recommendations with projected monthly savings.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_m365_license_summary",
-        "description": (
-            "Get the user's Microsoft 365 license summary including total monthly "
-            "spend, per-SKU usage (consumed vs enabled), unused licenses with "
-            "estimated cost, inactive-user count, and prioritized recommendations. "
-            "Use this for any M365 licensing, user activity, or savings question."
-        ),
+        "description": "Get M365 license summary (per-SKU, unused, inactive users, recommendations).",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_azure_subscription_info",
-        "description": (
-            "Get the display name, ID, and state of the currently configured Azure "
-            "subscription. Use when the user asks which subscription they're "
-            "looking at."
-        ),
+        "description": "Get the display name, ID, and state of the configured Azure subscription.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
 ]
 
 
-# ---------------------------------------------------------------------------
-# Tool dispatch
-# ---------------------------------------------------------------------------
+def _make_client(api_key: str):
+    try:
+        import anthropic
+    except ImportError as exc:
+        raise RuntimeError(
+            "The 'anthropic' package is not installed. Run `pip install anthropic`."
+        ) from exc
 
-def _truncate_for_model(data: Any, max_chars: int = 12000) -> str:
-    """JSON-dump a tool result and truncate if it's too large for the context."""
+    try:
+        return anthropic.Anthropic(api_key=api_key)
+    except TypeError as exc:
+        if "proxies" in str(exc):
+            raise RuntimeError(
+                "Incompatible anthropic/httpx versions. Run `pip install --upgrade anthropic`."
+            ) from exc
+        raise
+
+
+def _truncate(data: Any, max_chars: int = 12000) -> str:
     text = json.dumps(data, default=str, indent=2)
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "\n... [truncated for length]"
 
 
-def _run_tool(config, tool_name: str, tool_input: dict) -> str:
-    """Dispatches a tool call to the appropriate service function."""
+def _run_tool(config, name: str, tool_input: dict) -> str:
     try:
-        if tool_name == "get_azure_cost_summary":
+        if name == "get_azure_cost_summary":
             days = tool_input.get("days", 30)
             data = azure_service.get_cost_summary(config, days=days)
-            # Trim daily_trend to keep the payload small
             if "daily_trend" in data and len(data["daily_trend"]) > 14:
                 data = dict(data)
                 data["daily_trend"] = data["daily_trend"][-14:]
-            return _truncate_for_model(data)
+            return _truncate(data)
 
-        if tool_name == "get_azure_advisor_recommendations":
+        if name == "get_azure_advisor_recommendations":
             category = tool_input.get("category")
             recs = azure_service.get_advisor_recommendations(config)
             if category:
                 recs = [r for r in recs if r.get("category") == category]
-            # Slim each recommendation down
             slim = [
                 {
                     "name": r.get("name"),
@@ -156,74 +117,41 @@ def _run_tool(config, tool_name: str, tool_input: dict) -> str:
                 }
                 for r in recs
             ]
-            return _truncate_for_model({
-                "count": len(slim),
-                "recommendations": slim,
-            })
+            return _truncate({"count": len(slim), "recommendations": slim})
 
-        if tool_name == "get_azure_compute_rightsizing":
+        if name == "get_azure_compute_rightsizing":
             data = azure_service.get_compute_rightsizing(config)
-            return _truncate_for_model({
-                "count": len(data),
-                "recommendations": data,
-            })
+            return _truncate({"count": len(data), "recommendations": data})
 
-        if tool_name == "get_m365_license_summary":
-            data = m365_service.get_license_summary(config)
-            return _truncate_for_model(data)
+        if name == "get_m365_license_summary":
+            return _truncate(m365_service.get_license_summary(config))
 
-        if tool_name == "get_azure_subscription_info":
-            data = azure_service.get_subscription_info(config)
-            return _truncate_for_model(data)
+        if name == "get_azure_subscription_info":
+            return _truncate(azure_service.get_subscription_info(config))
 
-        return json.dumps({"error": f"Unknown tool: {tool_name}"})
+        return json.dumps({"error": f"Unknown tool: {name}"})
     except Exception as exc:
-        logger.error("Tool %s failed: %s", tool_name, exc)
-        return json.dumps({"error": f"Tool {tool_name} failed: {exc}"})
+        logger.error("Tool %s failed: %s", name, exc)
+        return json.dumps({"error": f"Tool {name} failed: {exc}"})
 
-
-# ---------------------------------------------------------------------------
-# Public chat entry point
-# ---------------------------------------------------------------------------
 
 def chat(config, user_message: str, history: list[dict]) -> dict:
-    """
-    Runs one conversational turn.
-
-    Args:
-        config: loaded Config instance
-        user_message: the new message from the user
-        history: prior conversation as a list of {"role": "user"|"assistant", "content": str}
-
-    Returns:
-        {
-            "reply": str,               # final assistant text
-            "tools_used": list[str],    # names of tools Claude invoked this turn
-            "error": str | None,
-        }
-    """
     if not config.has_anthropic_config():
         return {
             "reply": (
-                "I need an Anthropic API key to chat. Please add one in Settings "
-                "under *AI Analysis (Anthropic Claude)*, then try again."
+                "I need an Anthropic API key to chat. Please add one in Settings under "
+                "*AI Analysis (Anthropic Claude)*, then try again."
             ),
             "tools_used": [],
             "error": "no_anthropic_key",
         }
 
     try:
-        import anthropic
-    except ImportError:
-        return {
-            "reply": "The anthropic SDK is not installed on the server.",
-            "tools_used": [],
-            "error": "missing_sdk",
-        }
+        client = _make_client(config.anthropic_api_key)
+    except RuntimeError as exc:
+        logger.error("Failed to init Anthropic client: %s", exc)
+        return {"reply": f"Sorry, I can't start the chat: {exc}", "tools_used": [], "error": "client_init_failed"}
 
-    client = anthropic.Anthropic(api_key=config.anthropic_api_key)
-
-    # Build the message list for the API call
     messages: list[dict] = []
     for turn in history or []:
         role = turn.get("role")
@@ -233,10 +161,10 @@ def chat(config, user_message: str, history: list[dict]) -> dict:
     messages.append({"role": "user", "content": user_message})
 
     tools_used: list[str] = []
-    max_iterations = 5  # Safety cap on tool-use loop
+    MAX_ITERATIONS = 5
 
     try:
-        for _ in range(max_iterations):
+        for _ in range(MAX_ITERATIONS):
             response = client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=2048,
@@ -246,9 +174,7 @@ def chat(config, user_message: str, history: list[dict]) -> dict:
             )
 
             if response.stop_reason == "tool_use":
-                # Append the assistant message (including tool_use blocks) verbatim
                 messages.append({"role": "assistant", "content": response.content})
-
                 tool_results = []
                 for block in response.content:
                     if block.type == "tool_use":
@@ -259,34 +185,18 @@ def chat(config, user_message: str, history: list[dict]) -> dict:
                             "tool_use_id": block.id,
                             "content": result_text,
                         })
-
                 messages.append({"role": "user", "content": tool_results})
-                continue  # loop again so Claude can respond to tool results
+                continue
 
-            # Regular end_turn or stop - collect text
-            reply_parts = [
-                block.text for block in response.content
-                if getattr(block, "type", None) == "text"
-            ]
+            reply_parts = [b.text for b in response.content if getattr(b, "type", None) == "text"]
             reply_text = "\n".join(reply_parts).strip() or "(no response)"
-            return {
-                "reply": reply_text,
-                "tools_used": tools_used,
-                "error": None,
-            }
+            return {"reply": reply_text, "tools_used": tools_used, "error": None}
 
         return {
-            "reply": (
-                "I got stuck in a tool-use loop. Please try rephrasing your question."
-            ),
+            "reply": "I got stuck in a tool-use loop. Please rephrase your question.",
             "tools_used": tools_used,
             "error": "max_iterations",
         }
-
     except Exception as exc:
         logger.error("Chat call failed: %s", exc)
-        return {
-            "reply": f"Sorry, I hit an error talking to Claude: {exc}",
-            "tools_used": tools_used,
-            "error": str(exc),
-        }
+        return {"reply": f"Sorry, I hit an error talking to Claude: {exc}", "tools_used": tools_used, "error": str(exc)}

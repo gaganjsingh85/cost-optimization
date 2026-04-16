@@ -23,6 +23,7 @@ import {
 import SavingsCard from '../components/SavingsCard';
 import RecommendationCard from '../components/RecommendationCard';
 import LoadingSpinner from '../components/LoadingSpinner';
+import DataStatusBanner from '../components/DataStatusBanner';
 import {
   getCostSummary,
   getAdvisorRecommendations,
@@ -62,26 +63,34 @@ function Dashboard() {
 
   const [costData, setCostData] = useState(null);
   const [recommendations, setRecommendations] = useState([]);
-  const [advisorAll, setAdvisorAll] = useState([]); // full list, for savings calc
+  const [advisorAll, setAdvisorAll] = useState([]);
+  const [advisorMeta, setAdvisorMeta] = useState(null);
   const [m365Summary, setM365Summary] = useState(null);
   const [analysisResult, setAnalysisResult] = useState(null);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (forceRefresh = false) => {
     setLoading(true);
     setError(null);
 
     try {
+      const opts = forceRefresh ? { forceRefresh: true } : undefined;
       const [costRes, advisorRes, m365Res] = await Promise.allSettled([
-        getCostSummary(30),
-        getAdvisorRecommendations(),
-        getM365Summary(),
+        getCostSummary(30, opts),
+        getAdvisorRecommendations(undefined, opts),
+        getM365Summary(opts),
       ]);
 
       if (costRes.status === 'fulfilled') setCostData(costRes.value);
 
       if (advisorRes.status === 'fulfilled') {
-        const recs = advisorRes.value?.recommendations || [];
+        const payload = advisorRes.value || {};
+        const recs = payload.recommendations || [];
         setAdvisorAll(recs);
+        setAdvisorMeta({
+          data_status: payload.data_status,
+          error: payload.error,
+          error_class: payload.error_class,
+        });
         const sorted = [...recs].sort((a, b) => {
           const order = { High: 0, Medium: 1, Low: 2 };
           return (order[a.impact] ?? 3) - (order[b.impact] ?? 3);
@@ -89,14 +98,12 @@ function Dashboard() {
         setRecommendations(sorted.slice(0, 5));
       }
 
-      if (m365Res.status === 'fulfilled') {
-        setM365Summary(m365Res.value);
-      }
+      if (m365Res.status === 'fulfilled') setM365Summary(m365Res.value);
 
-      const anyFailed = [costRes, advisorRes, m365Res].some(
+      const anyNetworkFailed = [costRes, advisorRes, m365Res].some(
         (r) => r.status === 'rejected' && r.reason?.isNetworkError
       );
-      if (anyFailed) {
+      if (anyNetworkFailed) {
         setError('Some data could not be loaded. Is the backend running?');
       }
     } catch (err) {
@@ -122,16 +129,10 @@ function Dashboard() {
     }
   };
 
-  // ------------------------- KPI derivations (FIXED) -------------------------
+  // KPIs
+  const totalAzureSpend = costData?.total_cost ?? null;
 
-  // Azure total spend: from cost summary
-  const totalAzureSpend = useMemo(() => {
-    if (!costData) return null;
-    return costData.total_cost ?? null;
-  }, [costData]);
-
-  // Azure potential savings: derived from Advisor (backend doesn't return it on /costs/summary)
-  // Sum annual savings across all cost-category recs, divide by 12 for monthly
+  // Azure savings = annual savings from Advisor / 12
   const potentialAzureSavings = useMemo(() => {
     if (!advisorAll || advisorAll.length === 0) return null;
     const annualTotal = advisorAll.reduce(
@@ -141,19 +142,9 @@ function Dashboard() {
     return annualTotal > 0 ? annualTotal / 12 : 0;
   }, [advisorAll]);
 
-  // M365 monthly spend: use the summary endpoint which already totals it
-  const m365MonthlySpend = useMemo(() => {
-    if (!m365Summary) return null;
-    return m365Summary.total_monthly_spend_estimate ?? null;
-  }, [m365Summary]);
+  const m365MonthlySpend = m365Summary?.total_monthly_spend_estimate ?? null;
+  const m365PotentialSavings = m365Summary?.potential_savings ?? null;
 
-  // M365 potential savings
-  const m365PotentialSavings = useMemo(() => {
-    if (!m365Summary) return null;
-    return m365Summary.potential_savings ?? null;
-  }, [m365Summary]);
-
-  // Chart data: services by cost
   const serviceChartData = useMemo(() => {
     const services = costData?.by_service || [];
     return services
@@ -165,47 +156,40 @@ function Dashboard() {
       .sort((a, b) => b.cost - a.cost);
   }, [costData]);
 
-  // License rows for the table - adapted to backend shape
   const licenseRows = useMemo(() => {
     const licenses = m365Summary?.licenses || [];
     return licenses.map((lic) => {
       const purchased = lic.enabled_units ?? 0;
-      const active = lic.consumed_units ?? 0;
-      const unused = lic.unused_units ?? Math.max(0, purchased - active);
+      const consumed = lic.consumed_units ?? 0;
+      const unused = lic.unused_units ?? Math.max(0, purchased - consumed);
       const unitCost = lic.unit_cost_estimate ?? 0;
-      const monthlyCost = active * unitCost;
-      const savingsOpp = lic.unused_cost_estimate ?? unused * unitCost;
-
       return {
         key: lic.sku_id || lic.sku_part_number,
         name: lic.friendly_name || lic.sku_part_number || 'Unknown',
         purchased,
-        active,
+        active: consumed,
         unused,
-        monthlyCost,
-        savingsOpp,
+        monthlyCost: consumed * unitCost,
+        savingsOpp: lic.unused_cost_estimate ?? unused * unitCost,
       };
     });
   }, [m365Summary]);
 
-  const quickWins =
-    analysisResult?.azure?.quick_wins ||
-    analysisResult?.quick_wins ||
-    [];
+  const quickWins = analysisResult?.azure?.quick_wins || [];
 
   return (
     <div className="p-6 space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Cost Optimization Dashboard</h1>
           <p className="text-gray-400 text-sm mt-1">
-            Last 30 days — {new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+            Last 30 days —{' '}
+            {new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
           </p>
         </div>
         <div className="flex items-center gap-3">
           <button
-            onClick={loadData}
+            onClick={() => loadData(true)}
             disabled={loading}
             className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded-lg"
             title="Refresh"
@@ -232,7 +216,6 @@ function Dashboard() {
         </div>
       </div>
 
-      {/* Error Banner */}
       {error && (
         <div className="flex items-center gap-2 bg-red-900/30 border border-red-700 rounded-xl px-4 py-3 text-red-300 text-sm">
           <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -246,7 +229,33 @@ function Dashboard() {
         </div>
       )}
 
-      {/* KPI Cards */}
+      {/* Data source banners */}
+      {costData && costData.data_status && costData.data_status !== 'live' && (
+        <DataStatusBanner
+          dataStatus={costData.data_status}
+          error={costData.error}
+          errorClass={costData.error_class}
+          source="azure"
+        />
+      )}
+      {advisorMeta && advisorMeta.data_status && advisorMeta.data_status !== 'live' && (
+        <DataStatusBanner
+          dataStatus={advisorMeta.data_status}
+          error={advisorMeta.error}
+          errorClass={advisorMeta.error_class}
+          source="azure"
+        />
+      )}
+      {m365Summary && m365Summary.data_status && m365Summary.data_status !== 'live' && (
+        <DataStatusBanner
+          dataStatus={m365Summary.data_status}
+          error={m365Summary.error}
+          errorClass={m365Summary.error_class}
+          source="m365"
+        />
+      )}
+
+      {/* KPIs */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <SavingsCard
           title="Total Azure Spend"
@@ -282,9 +291,7 @@ function Dashboard() {
         />
       </div>
 
-      {/* Main Content Grid */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        {/* Top Azure Advisor Recommendations */}
         <div className="bg-gray-800 border border-gray-700 rounded-xl">
           <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
             <h2 className="text-white font-semibold">Top Azure Advisor Recommendations</h2>
@@ -305,13 +312,16 @@ function Dashboard() {
               </div>
             ) : (
               recommendations.map((rec, idx) => (
-                <RecommendationCard key={rec.recommendation_id || idx} recommendation={rec} compact />
+                <RecommendationCard
+                  key={rec.id || rec.name || idx}
+                  recommendation={rec}
+                  compact
+                />
               ))
             )}
           </div>
         </div>
 
-        {/* Cost by Service Chart */}
         <div className="bg-gray-800 border border-gray-700 rounded-xl">
           <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
             <h2 className="text-white font-semibold">Cost by Service (Last 30 Days)</h2>
@@ -336,7 +346,10 @@ function Dashboard() {
               </div>
             ) : (
               <ResponsiveContainer width="100%" height={260}>
-                <BarChart data={serviceChartData} margin={{ top: 5, right: 20, left: 10, bottom: 60 }}>
+                <BarChart
+                  data={serviceChartData}
+                  margin={{ top: 5, right: 20, left: 10, bottom: 60 }}
+                >
                   <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                   <XAxis
                     dataKey="name"
@@ -362,7 +375,6 @@ function Dashboard() {
         </div>
       </div>
 
-      {/* M365 License Overview */}
       <div className="bg-gray-800 border border-gray-700 rounded-xl">
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
           <h2 className="text-white font-semibold">M365 License Overview</h2>
@@ -397,15 +409,32 @@ function Dashboard() {
               </thead>
               <tbody>
                 {licenseRows.map((row, idx) => (
-                  <tr key={row.key || idx} className="border-b border-gray-700/50 hover:bg-gray-700/30">
+                  <tr
+                    key={row.key || idx}
+                    className="border-b border-gray-700/50 hover:bg-gray-700/30"
+                  >
                     <td className="px-5 py-3 text-white font-medium">{row.name}</td>
-                    <td className="px-4 py-3 text-gray-300 text-right">{row.purchased.toLocaleString()}</td>
-                    <td className="px-4 py-3 text-green-400 text-right">{row.active.toLocaleString()}</td>
-                    <td className={`px-4 py-3 text-right font-medium ${row.unused > 0 ? 'text-red-400' : 'text-gray-400'}`}>
+                    <td className="px-4 py-3 text-gray-300 text-right">
+                      {row.purchased.toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3 text-green-400 text-right">
+                      {row.active.toLocaleString()}
+                    </td>
+                    <td
+                      className={`px-4 py-3 text-right font-medium ${
+                        row.unused > 0 ? 'text-red-400' : 'text-gray-400'
+                      }`}
+                    >
                       {row.unused.toLocaleString()}
                     </td>
-                    <td className="px-4 py-3 text-gray-300 text-right">{formatCurrency(row.monthlyCost)}</td>
-                    <td className={`px-5 py-3 text-right font-semibold ${row.savingsOpp > 0 ? 'text-green-400' : 'text-gray-500'}`}>
+                    <td className="px-4 py-3 text-gray-300 text-right">
+                      {formatCurrency(row.monthlyCost)}
+                    </td>
+                    <td
+                      className={`px-5 py-3 text-right font-semibold ${
+                        row.savingsOpp > 0 ? 'text-green-400' : 'text-gray-500'
+                      }`}
+                    >
                       {row.savingsOpp > 0 ? formatCurrency(row.savingsOpp) : '—'}
                     </td>
                   </tr>
@@ -416,7 +445,6 @@ function Dashboard() {
         )}
       </div>
 
-      {/* Quick Wins from AI Analysis */}
       {quickWins.length > 0 && (
         <div className="bg-gray-800 border border-green-800/50 rounded-xl">
           <div className="px-5 py-4 border-b border-gray-700">
@@ -431,7 +459,9 @@ function Dashboard() {
                 <li key={idx} className="flex items-start gap-2.5">
                   <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0 mt-0.5" />
                   <span className="text-gray-300 text-sm">
-                    {typeof win === 'string' ? win : win.action || win.title || JSON.stringify(win)}
+                    {typeof win === 'string'
+                      ? win
+                      : win.action || win.title || JSON.stringify(win)}
                   </span>
                 </li>
               ))}
