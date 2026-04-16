@@ -111,7 +111,12 @@ def _run_tool(config, name: str, tool_input: dict) -> str:
                     "impact": r.get("impact"),
                     "resource": r.get("impacted_value"),
                     "resource_group": r.get("resource_group"),
-                    "description": r.get("short_description"),
+                    "description": (r.get("short_description") or {}).get("problem")
+                        if isinstance(r.get("short_description"), dict)
+                        else r.get("description") or r.get("short_description"),
+                    "solution": (r.get("short_description") or {}).get("solution")
+                        if isinstance(r.get("short_description"), dict)
+                        else None,
                     "potential_annual_savings": r.get("potential_annual_savings", 0),
                     "sample_data": r.get("sample_data", False),
                 }

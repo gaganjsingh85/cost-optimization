@@ -69,6 +69,17 @@ def _parse_savings(text: str) -> float:
 # Fallback helpers
 # ---------------------------------------------------------------------------
 
+def _desc_text(rec: dict) -> str:
+    """Normalize short_description into a single string for prompts/fallbacks.
+    Handles both the new object form {problem, solution} and the legacy string form."""
+    sd = rec.get("short_description")
+    if isinstance(sd, dict):
+        return (sd.get("problem") or sd.get("solution") or "").strip()
+    if isinstance(sd, str):
+        return sd.strip()
+    return (rec.get("description") or "").strip()
+
+
 def _extract_opportunities(advisor_data: list[dict]) -> list[dict]:
     cost_recs = sorted(
         [r for r in advisor_data if r.get("category") == "Cost"],
@@ -77,11 +88,11 @@ def _extract_opportunities(advisor_data: list[dict]) -> list[dict]:
     )
     return [
         {
-            "title": r.get("short_description", "Cost opportunity"),
+            "title": _desc_text(r) or "Cost opportunity",
             "description": f"Resource: {r.get('impacted_value', 'N/A')} (RG: {r.get('resource_group', 'N/A')})",
             "estimated_monthly_savings": round(r.get("potential_annual_savings", 0) / 12, 2),
             "priority": r.get("impact", "Medium"),
-            "action_required": r.get("short_description", "Review and implement"),
+            "action_required": _desc_text(r) or "Review and implement",
         }
         for r in cost_recs[:5]
     ]
@@ -91,11 +102,11 @@ def _extract_quick_wins(advisor_data: list[dict]) -> list[dict]:
     keywords = ["delete", "shutdown", "deallocate", "idle", "unused", "unattached"]
     wins = []
     for rec in advisor_data:
-        desc = rec.get("short_description", "").lower()
+        desc = _desc_text(rec).lower()
         if any(kw in desc for kw in keywords):
             annual = rec.get("potential_annual_savings", 0)
             wins.append({
-                "action": rec.get("short_description", ""),
+                "action": _desc_text(rec),
                 "savings": f"${annual / 12:,.2f}/month",
                 "effort": "Low",
             })
@@ -221,7 +232,7 @@ def analyze_azure_costs(config, advisor_data, cost_data) -> dict:
             "category": r.get("category"),
             "impact": r.get("impact"),
             "impacted_value": r.get("impacted_value"),
-            "short_description": r.get("short_description"),
+            "short_description": _desc_text(r),
             "potential_annual_savings": r.get("potential_annual_savings", 0),
             "resource_group": r.get("resource_group"),
         }
