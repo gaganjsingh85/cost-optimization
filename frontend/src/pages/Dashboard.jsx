@@ -1,0 +1,412 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  Cell,
+} from 'recharts';
+import {
+  DollarSign,
+  TrendingDown,
+  Users,
+  Sparkles,
+  Play,
+  AlertCircle,
+  CheckCircle2,
+  RefreshCw,
+} from 'lucide-react';
+import SavingsCard from '../components/SavingsCard';
+import RecommendationCard from '../components/RecommendationCard';
+import LoadingSpinner from '../components/LoadingSpinner';
+import {
+  getCostSummary,
+  getAdvisorRecommendations,
+  getM365Licenses,
+  analyzeAll,
+} from '../api/client';
+
+function formatCurrency(value) {
+  if (value === null || value === undefined) return '—';
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+const CustomTooltip = ({ active, payload, label }) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 shadow-xl">
+        <p className="text-gray-300 text-xs mb-1">{label}</p>
+        <p className="text-blue-400 font-semibold text-sm">
+          {formatCurrency(payload[0]?.value)}
+        </p>
+      </div>
+    );
+  }
+  return null;
+};
+
+function Dashboard() {
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(true);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [error, setError] = useState(null);
+
+  const [costData, setCostData] = useState(null);
+  const [recommendations, setRecommendations] = useState([]);
+  const [licenses, setLicenses] = useState([]);
+  const [analysisResult, setAnalysisResult] = useState(null);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const [costRes, advisorRes, m365Res] = await Promise.allSettled([
+        getCostSummary(30),
+        getAdvisorRecommendations(),
+        getM365Licenses(),
+      ]);
+
+      if (costRes.status === 'fulfilled') setCostData(costRes.value);
+      if (advisorRes.status === 'fulfilled') {
+        const recs = advisorRes.value?.recommendations || advisorRes.value || [];
+        const sorted = [...recs].sort((a, b) => {
+          const order = { High: 0, Medium: 1, Low: 2 };
+          return (order[a.impact] ?? 3) - (order[b.impact] ?? 3);
+        });
+        setRecommendations(sorted.slice(0, 5));
+      }
+      if (m365Res.status === 'fulfilled') {
+        setLicenses(m365Res.value?.licenses || m365Res.value || []);
+      }
+
+      const anyFailed = [costRes, advisorRes, m365Res].some(
+        (r) => r.status === 'rejected' && r.reason?.isNetworkError
+      );
+      if (anyFailed) {
+        setError('Some data could not be loaded. Is the backend running?');
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const handleRunAnalysis = async () => {
+    setAnalyzing(true);
+    try {
+      const result = await analyzeAll();
+      setAnalysisResult(result);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  // Build chart data from cost summary
+  const serviceChartData = React.useMemo(() => {
+    const services = costData?.by_service || costData?.services || [];
+    if (Array.isArray(services)) {
+      return services
+        .slice(0, 8)
+        .map((s) => ({
+          name: (s.service_name || s.name || s.service || 'Unknown').replace('Microsoft.', ''),
+          cost: parseFloat(s.cost || s.total_cost || 0),
+        }))
+        .sort((a, b) => b.cost - a.cost);
+    }
+    return [];
+  }, [costData]);
+
+  const totalAzureSpend = costData?.total_cost ?? costData?.total ?? null;
+  const potentialAzureSavings = costData?.potential_savings ?? null;
+  const m365MonthlySpend = licenses.reduce(
+    (sum, l) => sum + (l.monthly_cost || 0),
+    0
+  );
+  const m365PotentialSavings = licenses.reduce(
+    (sum, l) => sum + ((l.unused_count || 0) * (l.unit_price || 0)),
+    0
+  );
+
+  const quickWins =
+    analysisResult?.quick_wins ||
+    analysisResult?.azure_analysis?.quick_wins ||
+    [];
+
+  return (
+    <div className="p-6 space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-white">Cost Optimization Dashboard</h1>
+          <p className="text-gray-400 text-sm mt-1">
+            Last 30 days — {new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={loadData}
+            disabled={loading}
+            className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded-lg"
+            title="Refresh"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+          <button
+            onClick={handleRunAnalysis}
+            disabled={analyzing || loading}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+          >
+            {analyzing ? (
+              <>
+                <Sparkles className="w-4 h-4 animate-pulse" />
+                Analyzing...
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4" />
+                Run Full Analysis
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Error Banner */}
+      {error && (
+        <div className="flex items-center gap-2 bg-red-900/30 border border-red-700 rounded-xl px-4 py-3 text-red-300 text-sm">
+          <AlertCircle className="w-4 h-4 flex-shrink-0" />
+          {error}
+          <button
+            onClick={() => setError(null)}
+            className="ml-auto text-red-400 hover:text-red-200"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        <SavingsCard
+          title="Total Azure Spend"
+          value={loading ? null : formatCurrency(totalAzureSpend)}
+          subtitle="Last 30 days"
+          icon={DollarSign}
+          color="blue"
+          loading={loading}
+        />
+        <SavingsCard
+          title="Potential Azure Savings"
+          value={loading ? null : formatCurrency(potentialAzureSavings)}
+          subtitle="Based on Advisor"
+          icon={TrendingDown}
+          color="green"
+          loading={loading}
+        />
+        <SavingsCard
+          title="M365 Monthly Spend"
+          value={loading ? null : formatCurrency(m365MonthlySpend)}
+          subtitle="All license types"
+          icon={Users}
+          color="purple"
+          loading={loading}
+        />
+        <SavingsCard
+          title="Potential M365 Savings"
+          value={loading ? null : formatCurrency(m365PotentialSavings)}
+          subtitle="Unused licenses"
+          icon={TrendingDown}
+          color="green"
+          loading={loading}
+        />
+      </div>
+
+      {/* Main Content Grid */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        {/* Top Azure Advisor Recommendations */}
+        <div className="bg-gray-800 border border-gray-700 rounded-xl">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+            <h2 className="text-white font-semibold">Top Azure Advisor Recommendations</h2>
+            <button
+              onClick={() => navigate('/advisor')}
+              className="text-blue-400 hover:text-blue-300 text-xs font-medium"
+            >
+              View all
+            </button>
+          </div>
+          <div className="p-4 space-y-3">
+            {loading ? (
+              <LoadingSpinner message="Loading recommendations..." fullPage />
+            ) : recommendations.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">
+                <CheckCircle2 className="w-10 h-10 mx-auto mb-2 opacity-30" />
+                <p className="text-sm">No recommendations available</p>
+              </div>
+            ) : (
+              recommendations.map((rec, idx) => (
+                <RecommendationCard key={rec.recommendation_id || idx} recommendation={rec} compact />
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Cost by Service Chart */}
+        <div className="bg-gray-800 border border-gray-700 rounded-xl">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+            <h2 className="text-white font-semibold">Cost by Service (Last 30 Days)</h2>
+            <button
+              onClick={() => navigate('/costs')}
+              className="text-blue-400 hover:text-blue-300 text-xs font-medium"
+            >
+              Full analysis
+            </button>
+          </div>
+          <div className="p-4">
+            {loading ? (
+              <div className="h-64 flex items-center justify-center">
+                <LoadingSpinner message="Loading cost data..." />
+              </div>
+            ) : serviceChartData.length === 0 ? (
+              <div className="h-64 flex items-center justify-center text-gray-500">
+                <div className="text-center">
+                  <BarChart className="w-10 h-10 mx-auto mb-2 opacity-30" />
+                  <p className="text-sm">No cost data available</p>
+                </div>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={260}>
+                <BarChart data={serviceChartData} margin={{ top: 5, right: 20, left: 10, bottom: 60 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                  <XAxis
+                    dataKey="name"
+                    tick={{ fill: '#9ca3af', fontSize: 11 }}
+                    angle={-40}
+                    textAnchor="end"
+                    height={65}
+                  />
+                  <YAxis
+                    tick={{ fill: '#9ca3af', fontSize: 11 }}
+                    tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`}
+                  />
+                  <Tooltip content={<CustomTooltip />} />
+                  <Bar dataKey="cost" radius={[4, 4, 0, 0]}>
+                    {serviceChartData.map((_, i) => (
+                      <Cell key={i} fill={i === 0 ? '#3b82f6' : '#1d4ed8'} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* M365 License Overview */}
+      <div className="bg-gray-800 border border-gray-700 rounded-xl">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+          <h2 className="text-white font-semibold">M365 License Overview</h2>
+          <button
+            onClick={() => navigate('/m365')}
+            className="text-blue-400 hover:text-blue-300 text-xs font-medium"
+          >
+            Full details
+          </button>
+        </div>
+        {loading ? (
+          <div className="p-8">
+            <LoadingSpinner message="Loading license data..." fullPage />
+          </div>
+        ) : licenses.length === 0 ? (
+          <div className="text-center py-8 text-gray-500">
+            <Users className="w-10 h-10 mx-auto mb-2 opacity-30" />
+            <p className="text-sm">No license data available</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-700">
+                  <th className="text-left text-gray-400 font-medium px-5 py-3">License Name</th>
+                  <th className="text-right text-gray-400 font-medium px-4 py-3">Purchased</th>
+                  <th className="text-right text-gray-400 font-medium px-4 py-3">Used</th>
+                  <th className="text-right text-gray-400 font-medium px-4 py-3">Unused</th>
+                  <th className="text-right text-gray-400 font-medium px-4 py-3">Monthly Cost</th>
+                  <th className="text-right text-gray-400 font-medium px-5 py-3">Savings Opp.</th>
+                </tr>
+              </thead>
+              <tbody>
+                {licenses.map((lic, idx) => {
+                  const unused = (lic.purchased_count || lic.total || 0) - (lic.active_count || lic.used || 0);
+                  const savingsOpp = unused * (lic.unit_price || 0);
+                  return (
+                    <tr key={lic.sku_id || idx} className="border-b border-gray-700/50 hover:bg-gray-700/30">
+                      <td className="px-5 py-3 text-white font-medium">
+                        {lic.sku_name || lic.license_name || lic.name || 'Unknown'}
+                      </td>
+                      <td className="px-4 py-3 text-gray-300 text-right">
+                        {(lic.purchased_count || lic.total || 0).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-3 text-green-400 text-right">
+                        {(lic.active_count || lic.used || 0).toLocaleString()}
+                      </td>
+                      <td className={`px-4 py-3 text-right font-medium ${unused > 0 ? 'text-red-400' : 'text-gray-400'}`}>
+                        {unused.toLocaleString()}
+                      </td>
+                      <td className="px-4 py-3 text-gray-300 text-right">
+                        {formatCurrency(lic.monthly_cost || 0)}
+                      </td>
+                      <td className={`px-5 py-3 text-right font-semibold ${savingsOpp > 0 ? 'text-green-400' : 'text-gray-500'}`}>
+                        {savingsOpp > 0 ? formatCurrency(savingsOpp) : '—'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Quick Wins from AI Analysis */}
+      {quickWins.length > 0 && (
+        <div className="bg-gray-800 border border-green-800/50 rounded-xl">
+          <div className="px-5 py-4 border-b border-gray-700">
+            <h2 className="text-white font-semibold flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-green-400" />
+              AI-Identified Quick Wins
+            </h2>
+          </div>
+          <div className="p-5">
+            <ul className="space-y-2">
+              {quickWins.map((win, idx) => (
+                <li key={idx} className="flex items-start gap-2.5">
+                  <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0 mt-0.5" />
+                  <span className="text-gray-300 text-sm">{win}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default Dashboard;
