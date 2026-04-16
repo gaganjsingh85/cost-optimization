@@ -1,10 +1,10 @@
 {
-  "azure_tenant_id": "6fe8d73b-53aa-4530-a509-eebe12a649bb",
-  "azure_client_id": "5d3227e7-1b98-451b-9290-8dc15865f90b",
-  "azure_client_secret": "9KU8Q~itIpoSBPTkA577nJ23BPBJ0TMf-mCRNdcE",
-  "azure_subscription_id": "bb02c374-4c1f-4ab5-97b6-45386b81ccd6",
-  "m365_tenant_id": "6fe8d73b-53aa-4530-a509-eebe12a649bb",
-  "m365_client_id": "5d3227e7-1b98-451b-9290-8dc15865f90b",
-  "m365_client_secret": "9KU8Q~itIpoSBPTkA577nJ23BPBJ0TMf-mCRNdcE",
-  "anthropic_api_key": "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"
+  "azure_tenant_id": "Tenent ID",
+  "azure_client_id": "Client ID",
+  "azure_client_secret": "Client Secret",
+  "azure_subscription_id": "Subscription Id",
+  "m365_tenant_id": "M365 Tenant ID",
+  "m365_client_id": "M365 Client ID",
+  "m365_client_secret": "M365 Client Secret",
+  "anthropic_api_key": "Claude Code"
 }
